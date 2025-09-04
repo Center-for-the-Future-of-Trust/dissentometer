@@ -33,7 +33,15 @@ mkdir -p "${ROOT_DIR}/venvs" "${DATA_DIR}" "${OUT_DIR}" "${TOKEN_DIR}"
 
 # ===== Python: use whatever python3 is on PATH =====
 if [[ ! -d "${VENV_DIR}" ]]; then
+  set +e
   python3 -m venv "${VENV_DIR}"
+  E=$?
+  echo $E
+  set -e
+  if [ $E -ne 0 ]; then 
+    echo "Python's venv failed. Attempting virtualenv ..."
+    virtualenv "${VENV_DIR}"
+  fi
 fi
 
 # Activate and upgrade pip

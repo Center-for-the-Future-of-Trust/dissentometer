@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # date_tagger_resilient_venv.sbatch — handles 'ensurepip is not available' on HPC
+# Phase A: bucketize & submit array
+# Phase B: per-task runner that activates venv and calls date_tagger.py
 
 #SBATCH --job-name=tag_dates_full
 #SBATCH --output=%x_%A_%a.out
@@ -10,13 +12,12 @@
 
 set -euo pipefail
 
+# Optional modules (safe if your cluster doesn't use modules)
 #module purge
-
 [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh
-
 #module load python/3.10
 
-# Force user-writable paths (project dir assumed to be submit-dir/PWD)
+# ---- Config (override via --export=ALL,VAR=val when submitting) ----
 : "${PROJECT_ROOT:=/local/scratch/sbuongi/date_tagger}"
 : "${VENV_DIR:=${PROJECT_ROOT}/venvs/groq_tagging}"
 : "${OUT_BASE:=/local/scratch/sbuongi/wiki_data_output/tagging}"
@@ -26,7 +27,7 @@ set -euo pipefail
 : "${KEYS_FILE:=${PROJECT_ROOT}/keys.txt}"
 : "${CONTENT_COL:=English translation}"
 : "${TAG_COL:=date_tagged}"
-: "${MODEL_NAME:=llama-3.3-70b-versatile}"
+: "${MODEL_NAME:=llama-3.1-8b-instant}"
 : "${PY_SCRIPT:=date_tagger.py}"
 : "${TOKEN_STATE_DIR:=${PROJECT_ROOT}/token_state}"
 
@@ -98,10 +99,12 @@ if [[ -z "${SLURM_ARRAY_TASK_ID+x}" ]]; then
   mkdir -p "${BUCKET_ROOT}"
   : > "${OUT_BASE}/dirs.txt"
 
+  # Pre-create N bucket dirs
   for i in $(seq 0 $((N-1))); do
     mkdir -p "${BUCKET_ROOT}/bucket_${i}"
   done
 
+  # Round-robin copy CSVs from SRC_DIRS/*/*.csv into buckets
   i=0
   shopt -s nullglob
   for src in ${SRC_DIRS}/*; do
@@ -113,15 +116,21 @@ if [[ -z "${SLURM_ARRAY_TASK_ID+x}" ]]; then
   done
   shopt -u nullglob
 
+  # List bucket paths for the array
   for i in $(seq 0 $((N-1))); do
     echo "${BUCKET_ROOT}/bucket_${i}" >> "${OUT_BASE}/dirs.txt"
   done
 
+  # Expand keys so each array index has a key (round-robin over keys.txt)
   if [[ -f "${KEYS_FILE}" ]]; then mapfile -t KEYS < "${KEYS_FILE}"; else KEYS=(); fi
   : > "${OUT_BASE}/keys.expanded.txt"
   for i in $(seq 0 $((N-1))); do
-    if (( ${#KEYS[@]} )); then idx=$(( i % ${#KEYS[@]} )); echo "${KEYS[$idx]}" >> "${OUT_BASE}/keys.expanded.txt"
-    else echo "" >> "${OUT_BASE}/keys.expanded.txt"; fi
+    if (( ${#KEYS[@]} )); then
+      idx=$(( i % ${#KEYS[@]} ))
+      echo "${KEYS[$idx]}" >> "${OUT_BASE}/keys.expanded.txt"
+    else
+      echo "" >> "${OUT_BASE}/keys.expanded.txt"
+    fi
   done
 
   TOTAL="$(wc -l < "${OUT_BASE}/dirs.txt" | tr -d ' ')"
@@ -165,7 +174,7 @@ echo "[INFO] DATA_DIR: $DATA_DIR"
 mkdir -p "${TOKEN_STATE_DIR}"
 export TOKEN_STATE_DIR
 
-# Run
+# Run the Python tagger (uses srun for proper resource binding/logging)
 exec srun -u python "${PY_SCRIPT}" \
   --data-dir "$DATA_DIR" \
   --content-col "$CONTENT_COL" \

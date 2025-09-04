@@ -13,6 +13,7 @@ to the estimate used for reservation.
 """
 
 import argparse, csv, hashlib, json, os, re, sys, time
+import sys
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,7 +42,7 @@ Examples:
 
 DATEY_PATTERN = re.compile(
     r"""(?ix)
-    \b\d{3,4}\b                       # 3- or 4-digit numbers (likely years)
+    \b\d{3,4}s?\b                     # 3- or 4-digit numbers, with optional trailing 's' (e.g., 1920, 1920s)
     |
     \b(?:AD|CE|BC|BCE)\b              # era markers
     |
@@ -184,6 +185,7 @@ _SESSION = requests.Session()
 def groq_chat_once(query: str, model: str, system_prompt: Optional[str], timeout: float = 60.0):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
+        print("[API ] GROQ_API_KEY is not set", file=sys.stderr)
         return None, None
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -193,11 +195,12 @@ def groq_chat_once(query: str, model: str, system_prompt: Optional[str], timeout
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": query})
-    payload = {"model": model, "messages": messages}
+    payload = {"model": model, "messages": messages, "temperature": 0.0}
 
     try:
         resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
         if resp.status_code != 200:
+            print(f"[API ] status={resp.status_code} body={resp.text[:500]}", file=sys.stderr)
             return None, None
         data = resp.json()
         content = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
@@ -205,7 +208,8 @@ def groq_chat_once(query: str, model: str, system_prompt: Optional[str], timeout
         usage = data.get("usage", {})
         total_tokens = usage.get("total_tokens")
         return (content or None), total_tokens
-    except Exception:
+    except Exception as e:
+        print(f"[API ] exception={e}", file=sys.stderr)
         return None, None
 
 def tag_sentence_once(s: str, *, model: str, budget: TokenBudget, char_per_token: int) -> str:
@@ -244,8 +248,8 @@ def main() -> None:
     p.add_argument("--data-dir", required=True, help="Directory containing CSV files.")
     p.add_argument("--content-col", default="English translation", help="Column to read text from.")
     p.add_argument("--tag-col", default="date_tagged", help="New column to write tagged text into.")
-    #p.add_argument("--model", default="llama-3.1-8b-instant", help="Groq model name.")
-    p.add_argument("--model", default="llama-3.3-70b-versatile", help="Groq model name.")
+    #p.add_argument("--model", default="llama-3.3-70b-versatile", help="Groq model name.")
+    p.add_argument("--model", default="llama-3.1-8b-instant", help="Groq model name.")
     p.add_argument("--encoding", default="utf-8", help="CSV encoding.")
     p.add_argument("--char-per-token", type=int, default=4, help="Token estimate (~chars per token).")
     p.add_argument("--file-glob", default="*.csv", help="Glob for input files (non-recursive).")
@@ -306,10 +310,10 @@ def main() -> None:
         try:
             df = pd.read_csv(in_path, dtype=str, encoding=args.encoding)
         except Exception as e:
-            print(f"[SKIP] Could not read {in_path}: {e}"); continue
+            print(f"[SKIP] Could not read {in_path}: {e}", file=sys.stderr); continue
 
         if args.content_col not in df.columns:
-            print(f"[SKIP] Missing column '{args.content_col}' in {in_path}"); continue
+            print(f"[SKIP] Missing column '{args.content_col}' in {in_path}", file=sys.stderr); continue
 
         print(f"[RUN ] {in_path.name} → {out_path.name}")
         df[args.tag_col] = df[args.content_col].apply(
