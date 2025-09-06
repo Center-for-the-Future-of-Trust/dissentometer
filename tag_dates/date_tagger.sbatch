@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# date_tagger_resilient_venv.sbatch — handles 'ensurepip is not available' on HPC
-# Phase A: bucketize & submit array
-# Phase B: per-task runner that activates venv and calls date_tagger.py
+# date_tagger_resilient_venv_fixed.sbatch — robust Groq toggle + safer key parsing + bucketized array
+# Phase A (controller): bucketize & submit array
+# Phase B (worker): activate venv and run date_tagger.py over one bucket
+#
+# NEW:
+# - IS_GROQ toggle: when true (true/1/yes/y), apply Groq defaults (model + limits). When false, keep non-Groq defaults.
+# - Limits are only exported when IS_GROQ=true (and can be overridden at submit time).
+# - Exports pass through to array safely even if unset, compatible with `set -u`.
 
 #SBATCH --job-name=tag_dates_full
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --error=%x_%A_%a.err
 #SBATCH --mem=1G
 #SBATCH --cpus-per-task=1
-#SBATCH --time=12:00:00
+#SBATCH --time=96:00:00
 
 set -euo pipefail
 
@@ -17,19 +22,42 @@ set -euo pipefail
 [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh
 #module load python/3.10
 
-# ---- Config (override via --export=ALL,VAR=val when submitting) ----
+# ---- Config (override via --export=ALL,VAR=value) ----
 : "${PROJECT_ROOT:=/local/scratch/sbuongi/date_tagger}"
 : "${VENV_DIR:=${PROJECT_ROOT}/venvs/groq_tagging}"
 : "${OUT_BASE:=/local/scratch/sbuongi/wiki_data_output/tagging}"
 : "${OUT_ROOT:=/local/scratch/sbuongi/wiki_data_output/outputs}"
 : "${SRC_DIRS:=/local/scratch/sbuongi/copied_data}"
-: "${N:=300}"
+: "${N:=1000}"
 : "${KEYS_FILE:=${PROJECT_ROOT}/keys.txt}"
 : "${CONTENT_COL:=English translation}"
 : "${TAG_COL:=date_tagged}"
-: "${MODEL_NAME:=llama-3.1-8b-instant}"
+: "${MODEL_NAME:=gpt-oss:20b}"          # non-Groq default model stays unless IS_GROQ=true
 : "${PY_SCRIPT:=date_tagger.py}"
 : "${TOKEN_STATE_DIR:=${PROJECT_ROOT}/token_state}"
+
+# --- Shared, node-visible state dir (absolute path so all nodes coordinate) ---
+export TOKEN_STATE_DIR=/local/scratch/sbuongi/token_state
+mkdir -p "$TOKEN_STATE_DIR"
+echo "Using TOKEN_STATE_DIR=$TOKEN_STATE_DIR"
+
+# ---- Toggle Groq-specific defaults/limits ----
+: "${IS_GROQ:=false}"   # set to true/1/yes/y to enable Groq defaults/limits
+
+is_true() {
+  case "${1,,}" in true|1|yes|y) return 0 ;; *) return 1 ;; esac
+}
+
+if is_true "${IS_GROQ:-false}"; then
+  # If user hasn't overridden MODEL_NAME, set Groq default
+  if [[ -z "${MODEL_NAME:-}" || "${MODEL_NAME}" == "gpt-oss:20b" ]]; then
+    export MODEL_NAME="llama-3.1-8b-instant"
+  fi
+  # Groq limits (only set when Groq is enabled; can be overridden by submit-time exports)
+  export GROQ_RPM="${GROQ_RPM:-500}"       # requests/min
+  export GROQ_RPD="${GROQ_RPD:-500000}"    # requests/day
+  export GROQ_TPM="${GROQ_TPM:-100000}"    # tokens/min
+fi
 
 mkdir -p "${OUT_BASE}" "${OUT_ROOT}" "${TOKEN_STATE_DIR}"
 
@@ -78,10 +106,8 @@ create_venv() {
     return 0
   fi
   echo "[WARN] 'python -m venv' failed. Trying virtualenv fallback..."
-  # Try pip-installing virtualenv to user site and create venv
   if "${pybin}" -m pip --version >/dev/null 2>&1; then
     "${pybin}" -m pip install --user --upgrade virtualenv >/dev/null 2>&1 || true
-    # virtualenv could land in ~/.local/bin
     if command -v virtualenv >/dev/null 2>&1; then
       virtualenv "${VENV_DIR}" && return 0
     elif [[ -x "${HOME}/.local/bin/virtualenv" ]]; then
@@ -121,25 +147,53 @@ if [[ -z "${SLURM_ARRAY_TASK_ID+x}" ]]; then
     echo "${BUCKET_ROOT}/bucket_${i}" >> "${OUT_BASE}/dirs.txt"
   done
 
-  # Expand keys so each array index has a key (round-robin over keys.txt)
-  if [[ -f "${KEYS_FILE}" ]]; then mapfile -t KEYS < "${KEYS_FILE}"; else KEYS=(); fi
+  # -------- Safer key parsing & expansion --------
   : > "${OUT_BASE}/keys.expanded.txt"
+  CLEAN_KEYS=()
+  if [[ -f "${KEYS_FILE}" ]]; then
+    while IFS= read -r line; do
+      line="${line%$'\r'}"
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -n "$line" && "$line" =~ ^gsk_[A-Za-z0-9]+ ]] && CLEAN_KEYS+=("$line")
+    done < "${KEYS_FILE}"
+  fi
+
+  if [[ ${#CLEAN_KEYS[@]} -eq 0 ]]; then
+    echo "[ERROR] No valid gsk_ keys found in ${KEYS_FILE}" >&2
+    exit 3
+  fi
+
   for i in $(seq 0 $((N-1))); do
-    if (( ${#KEYS[@]} )); then
-      idx=$(( i % ${#KEYS[@]} ))
-      echo "${KEYS[$idx]}" >> "${OUT_BASE}/keys.expanded.txt"
-    else
-      echo "" >> "${OUT_BASE}/keys.expanded.txt"
-    fi
+    idx=$(( i % ${#CLEAN_KEYS[@]} ))
+    printf '%s\n' "${CLEAN_KEYS[$idx]}" >> "${OUT_BASE}/keys.expanded.txt"
   done
+  echo "[INFO] Wrote ${N} lines to ${OUT_BASE}/keys.expanded.txt (from ${#CLEAN_KEYS[@]} unique keys)"
 
   TOTAL="$(wc -l < "${OUT_BASE}/dirs.txt" | tr -d ' ')"
   echo "[INFO] Prepared ${TOTAL} buckets under ${BUCKET_ROOT}"
   echo "[INFO] Submitting array 0-$((TOTAL-1))"
 
+  # Choose a safe default concurrency cap. Adjust %X to match your per-key rate budget.
   sbatch \
-    --array=0-$((TOTAL-1)) \
-    --export=ALL,PROJECT_ROOT="${PROJECT_ROOT}",VENV_DIR="${VENV_DIR}",OUT_BASE="${OUT_BASE}",OUT_ROOT="${OUT_ROOT}",SRC_DIRS="${SRC_DIRS}",N="${N}",KEYS_FILE="${KEYS_FILE}",CONTENT_COL="${CONTENT_COL}",TAG_COL="${TAG_COL}",MODEL_NAME="${MODEL_NAME}",PY_SCRIPT="${PY_SCRIPT}",TOKEN_STATE_DIR="${TOKEN_STATE_DIR}" \
+    --array=0-$((TOTAL-1))%200 \
+    --export=ALL,\
+IS_GROQ="${IS_GROQ}",\
+PROJECT_ROOT="${PROJECT_ROOT}",\
+VENV_DIR="${VENV_DIR}",\
+OUT_BASE="${OUT_BASE}",\
+OUT_ROOT="${OUT_ROOT}",\
+SRC_DIRS="${SRC_DIRS}",\
+N="${N}",\
+KEYS_FILE="${KEYS_FILE}",\
+CONTENT_COL="${CONTENT_COL}",\
+TAG_COL="${TAG_COL}",\
+MODEL_NAME="${MODEL_NAME}",\
+PY_SCRIPT="${PY_SCRIPT}",\
+TOKEN_STATE_DIR="${TOKEN_STATE_DIR}",\
+GROQ_RPM="${GROQ_RPM-}",\
+GROQ_TPM="${GROQ_TPM-}",\
+GROQ_RPD="${GROQ_RPD-}" \
     "$(realpath "$0")" -p "${PY_SCRIPT}"
   exit 0
 fi
@@ -160,21 +214,38 @@ python -m pip install --upgrade pip wheel >/dev/null 2>&1 || true
 
 # Load Phase B inputs
 mapfile -t DIRS < "${OUT_BASE}/dirs.txt"
-mapfile -t KEYS < "${OUT_BASE}/keys.expanded.txt"
+mapfile -t KEYS_RAW < "${OUT_BASE}/keys.expanded.txt"
 IDX="${SLURM_ARRAY_TASK_ID}"
 TOTAL="${#DIRS[@]}"
 (( IDX >= 0 && IDX < TOTAL )) || { echo "[ERROR] Index $IDX out of range (0..$((TOTAL-1)))"; exit 6; }
 
 DATA_DIR="${DIRS[$IDX]}"
-export GROQ_API_KEY="${KEYS[$IDX]:-}"
-
-echo "[INFO] DATA_DIR: $DATA_DIR"
 [[ -d "$DATA_DIR" ]] || { echo "[ERROR] Missing DATA_DIR: $DATA_DIR"; exit 7; }
+
+# -------- Safer key selection (trim/validate) --------
+raw_key="${KEYS_RAW[$IDX]:-}"
+raw_key="${raw_key%$'\r'}"
+raw_key="${raw_key#"${raw_key%%[![:space:]]*}"}"
+raw_key="${raw_key%"${raw_key##*[![:space:]]}"}"
+
+if [[ -z "$raw_key" || ! "$raw_key" =~ ^gsk_[A-Za-z0-9]+$ ]]; then
+  echo "[ERROR] Invalid or empty key at index $IDX in ${OUT_BASE}/keys.expanded.txt" >&2
+  exit 8
+fi
+
+export GROQ_API_KEY="$raw_key"
+echo "[KEYS] Using key index ${IDX} (len=${#GROQ_API_KEY})" >&2
 
 mkdir -p "${TOKEN_STATE_DIR}"
 export TOKEN_STATE_DIR
 
+echo "[INFO] DATA_DIR: $DATA_DIR"
+echo "[INFO] IS_GROQ: ${IS_GROQ}"
+echo "[INFO] MODEL: ${MODEL_NAME}"
+echo "[INFO] CONTENT_COL: ${CONTENT_COL}  TAG_COL: ${TAG_COL}"
+
 # Run the Python tagger (uses srun for proper resource binding/logging)
+# NOTE: PY_SCRIPT is the Python file to run (e.g., date_tagger.py).
 exec srun -u python "${PY_SCRIPT}" \
   --data-dir "$DATA_DIR" \
   --content-col "$CONTENT_COL" \

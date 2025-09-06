@@ -188,8 +188,10 @@ def groq_chat_once(query: str, model: str, system_prompt: Optional[str], timeout
         print("[API ] GROQ_API_KEY is not set", file=sys.stderr)
         return None, None
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    # url = "https://api.groq.com/openai/v1/chat/completions"
+    # headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    url = "http://localhost:58112/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
 
     messages = []
     if system_prompt:
@@ -249,7 +251,10 @@ def main() -> None:
     p.add_argument("--content-col", default="English translation", help="Column to read text from.")
     p.add_argument("--tag-col", default="date_tagged", help="New column to write tagged text into.")
     #p.add_argument("--model", default="llama-3.3-70b-versatile", help="Groq model name.")
-    p.add_argument("--model", default="llama-3.1-8b-instant", help="Groq model name.")
+    
+    default_model = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
+    p.add_argument("--model", default=default_model, help="Groq model name.")
+    
     p.add_argument("--encoding", default="utf-8", help="CSV encoding.")
     p.add_argument("--char-per-token", type=int, default=4, help="Token estimate (~chars per token).")
     p.add_argument("--file-glob", default="*.csv", help="Glob for input files (non-recursive).")
