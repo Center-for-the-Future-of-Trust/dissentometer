@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# date_tagger_resilient_rate_limited.sbatch — generic rate limiting (always on) + safer key parsing + bucketized array
+#
 # Phase A (controller): bucketize & submit array
 # Phase B (worker): activate venv and run date_tagger.py over one bucket
-#
-# WHAT'S NEW IN THIS VERSION
-# - Rate limiting is ALWAYS enabled, regardless of provider toggles.
-# - Generic env var names (no 'GROQ' in the limiter names).
-# - Backwards-compat shim: if legacy GROQ_* vars are present, they are mapped into the new generic names.
-# - Safer API key parsing/expansion; trims whitespace/CRLF and ignores blank/comment lines.
-# - Optional % concurrency cap commented out (leave it if you want no cap).
 #
 # USAGE EXAMPLE (controller; Phase A):
 #   sbatch --export=ALL,PROJECT_ROOT=/local/scratch/sbuongi/date_tagger,DATA_ROOT=/local/scratch/sbuongi/copied_data,BUCKET_SIZE=300 \
@@ -18,7 +11,7 @@
 #   export SLURM_ARRAY_TASK_ID=0; bash date_tagger_resilient_rate_limited.sbatch
 #
 # Assumes a Python script `date_tagger.py` that reads limits from the generic env vars defined below.
-
+#
 #SBATCH --job-name=tag_dates_full
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --error=%x_%A_%a.err
@@ -35,7 +28,6 @@ istrue() {
   case "${1,,}" in true|1|yes|y) return 0 ;; *) return 1 ;; esac
 }
 
-# ---- Modules (safe to source if present) ----
 [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh || true
 
 # ---- Config (override via --export=ALL,VAR=val) ----
