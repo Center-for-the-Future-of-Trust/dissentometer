@@ -1,12 +1,23 @@
 #!/usr/bin/env bash
-# date_tagger_resilient_venv_fixed.sbatch — robust Groq toggle + safer key parsing + bucketized array
+# date_tagger_resilient_rate_limited.sbatch — generic rate limiting (always on) + safer key parsing + bucketized array
 # Phase A (controller): bucketize & submit array
 # Phase B (worker): activate venv and run date_tagger.py over one bucket
 #
-# NEW:
-# - IS_GROQ toggle: when true (true/1/yes/y), apply Groq defaults (model + limits). When false, keep non-Groq defaults.
-# - Limits are only exported when IS_GROQ=true (and can be overridden at submit time).
-# - Exports pass through to array safely even if unset, compatible with `set -u`.
+# WHAT'S NEW IN THIS VERSION
+# - Rate limiting is ALWAYS enabled, regardless of provider toggles.
+# - Generic env var names (no 'GROQ' in the limiter names).
+# - Backwards-compat shim: if legacy GROQ_* vars are present, they are mapped into the new generic names.
+# - Safer API key parsing/expansion; trims whitespace/CRLF and ignores blank/comment lines.
+# - Optional % concurrency cap commented out (leave it if you want no cap).
+#
+# USAGE EXAMPLE (controller; Phase A):
+#   sbatch --export=ALL,PROJECT_ROOT=/local/scratch/sbuongi/date_tagger,DATA_ROOT=/local/scratch/sbuongi/copied_data,BUCKET_SIZE=300 \
+#          date_tagger_resilient_rate_limited.sbatch
+#
+# USAGE EXAMPLE (worker; Phase B direct debug):
+#   export SLURM_ARRAY_TASK_ID=0; bash date_tagger_resilient_rate_limited.sbatch
+#
+# Assumes a Python script `date_tagger.py` that reads limits from the generic env vars defined below.
 
 #SBATCH --job-name=tag_dates_full
 #SBATCH --output=%x_%A_%a.out
@@ -14,239 +25,187 @@
 #SBATCH --mem=1G
 #SBATCH --cpus-per-task=1
 #SBATCH --time=96:00:00
+# If you want to throttle burstiness to roughly the number of keys, uncomment and set e.g. %10
+# #SBATCH --array=0-0%10
 
 set -euo pipefail
 
-# Optional modules (safe if your cluster doesn't use modules)
-#module purge
-[ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh
-#module load python/3.10
-
-# ---- Config (override via --export=ALL,VAR=value) ----
-: "${PROJECT_ROOT:=/local/scratch/sbuongi/date_tagger}"
-: "${VENV_DIR:=${PROJECT_ROOT}/venvs/groq_tagging}"
-: "${OUT_BASE:=/local/scratch/sbuongi/wiki_data_output/tagging}"
-: "${OUT_ROOT:=/local/scratch/sbuongi/wiki_data_output/outputs}"
-: "${SRC_DIRS:=/local/scratch/sbuongi/copied_data}"
-: "${N:=1000}"
-: "${KEYS_FILE:=${PROJECT_ROOT}/keys.txt}"
-: "${CONTENT_COL:=English translation}"
-: "${TAG_COL:=date_tagged}"
-: "${MODEL_NAME:=gpt-oss:20b}"          # non-Groq default model stays unless IS_GROQ=true
-: "${PY_SCRIPT:=date_tagger.py}"
-: "${TOKEN_STATE_DIR:=${PROJECT_ROOT}/token_state}"
-
-# --- Shared, node-visible state dir (absolute path so all nodes coordinate) ---
-export TOKEN_STATE_DIR=/local/scratch/sbuongi/token_state
-mkdir -p "$TOKEN_STATE_DIR"
-echo "Using TOKEN_STATE_DIR=$TOKEN_STATE_DIR"
-
-# ---- Toggle Groq-specific defaults/limits ----
-: "${IS_GROQ:=false}"   # set to true/1/yes/y to enable Groq defaults/limits
-
-is_true() {
+# ---- Helper: lowercase truthy check ----
+istrue() {
   case "${1,,}" in true|1|yes|y) return 0 ;; *) return 1 ;; esac
 }
 
-if is_true "${IS_GROQ:-false}"; then
-  # If user hasn't overridden MODEL_NAME, set Groq default
-  if [[ -z "${MODEL_NAME:-}" || "${MODEL_NAME}" == "gpt-oss:20b" ]]; then
-    export MODEL_NAME="llama-3.1-8b-instant"
-  fi
-  # Groq limits (only set when Groq is enabled; can be overridden by submit-time exports)
-  export GROQ_RPM="${GROQ_RPM:-500}"       # requests/min
-  export GROQ_RPD="${GROQ_RPD:-500000}"    # requests/day
-  export GROQ_TPM="${GROQ_TPM:-100000}"    # tokens/min
-fi
+# ---- Modules (safe to source if present) ----
+[ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh || true
 
-mkdir -p "${OUT_BASE}" "${OUT_ROOT}" "${TOKEN_STATE_DIR}"
+# ---- Config (override via --export=ALL,VAR=val) ----
+: "${PROJECT_ROOT:=$PWD}"
+: "${DATA_ROOT:=${PROJECT_ROOT}/data}"       # root folder holding CSVs (possibly many subdirs)
+: "${OUT_BASE:=${PROJECT_ROOT}/tagging}"     # base dir for outputs (per-bucket)
+: "${OUT_ROOT:=${PROJECT_ROOT}/outputs}"     # optional global outputs dir
+: "${VENV_ACTIVATE:=${PROJECT_ROOT}/venvs/groq_tagging/bin/activate}"  # existing venv path (name doesn't matter)
+: "${PY_SCRIPT:=${PROJECT_ROOT}/date_tagger.py}"
+: "${KEYS_FILE:=${PROJECT_ROOT}/keys.txt}"   # one API key per line
+: "${KEYS_EXPANDED:=${PROJECT_ROOT}/keys.expanded.txt}"
+: "${TOKEN_STATE_DIR:=/local/scratch/${USER}/token_state}"  # shared, node-visible absolute path
+: "${API_BASE_URL:=https://api.openai.com/v1/chat/completions}"  # or your local proxy/http://localhost:58112/v1/chat/completions
+: "${MODEL_NAME:=llama-3.1-8b-instant}"
+: "${CONTENT_COL:=English translation}"
+: "${TAG_COL:=date_tagged}"
 
-# ---------- helper: find a python with venv+ensurepip, else try modules ----------
-find_python() {
-  for cand in python3 python; do
-    if command -v "$cand" >/dev/null 2>&1; then
-      if "$cand" - <<'PY'
-import sys
-try:
-    import venv, ensurepip  # both must be available
-    ok = True
-except Exception:
-    ok = False
-sys.exit(0 if ok else 1)
+# Bucketing controls
+: "${BUCKET_SIZE:=300}"       # number of CSVs per bucket (≈ one array task)
+: "${BUCKET_LIST:=${PROJECT_ROOT}/bucket.list}"
+
+# ---- ALWAYS-ON GENERIC RATE LIMIT VARS ----
+# Preferred new names (what your Python should read):
+: "${RATE_LIMIT_RPM:=30}"        # requests per minute per key
+: "${RATE_LIMIT_TPM:=6000}"      # tokens per minute per key
+: "${RATE_LIMIT_RPD:=14400}"     # requests per day per key
+: "${RATE_LIMIT_TPD:=500000}"    # tokens per day per key
+
+# Back-compat shim: If legacy names are set, map them into the generic ones (without mentioning 'groq').
+if [[ -n "${GROQ_RPM:-}" ]];  then export RATE_LIMIT_RPM="${GROQ_RPM}";   fi
+if [[ -n "${GROQ_TPM:-}" ]];  then export RATE_LIMIT_TPM="${GROQ_TPM}";   fi
+if [[ -n "${GROQ_RPD:-}" ]];  then export RATE_LIMIT_RPD="${GROQ_RPD}";   fi
+if [[ -n "${GROQ_TPD:-}" ]];  then export RATE_LIMIT_TPD="${GROQ_TPD}";   fi
+
+# Optional global safety multipliers (e.g., run at 90% of the documented cap)
+: "${RATE_SLACK:=0.90}"  # 0.0–1.0
+python - <<'PY'
+import os, math
+def clamp(x, lo, hi): 
+    return max(lo, min(hi, x))
+slack = float(os.getenv("RATE_SLACK", "0.90"))
+slack = clamp(slack, 0.05, 1.0)
+def adj(name, default):
+    val = float(os.getenv(name, str(default)))
+    val = math.floor(val * slack) if "TPM" not in name else math.floor(val * slack)
+    os.environ[name] = str(max(1, int(val)))
+for n,d in [("RATE_LIMIT_RPM",30),("RATE_LIMIT_TPM",6000),("RATE_LIMIT_RPD",14400),("RATE_LIMIT_TPD",500000)]:
+    adj(n,d)
+# write back to shell
+print(f'export RATE_LIMIT_RPM={os.environ["RATE_LIMIT_RPM"]}')
+print(f'export RATE_LIMIT_TPM={os.environ["RATE_LIMIT_TPM"]}')
+print(f'export RATE_LIMIT_RPD={os.environ["RATE_LIMIT_RPD"]}')
+print(f'export RATE_LIMIT_TPD={os.environ["RATE_LIMIT_TPD"]}')
 PY
-      then echo "$cand"; return 0; fi
-    fi
-  done
-  if command -v module >/dev/null 2>&1; then
-    module load python/3.10 >/dev/null 2>&1 || module load Python/3.10 >/dev/null 2>&1 || module load anaconda3 >/dev/null 2>&1 || true
-    for cand in python3 python; do
-      if command -v "$cand" >/dev/null 2>&1; then
-        if "$cand" - <<'PY'
-import sys
-try:
-    import venv, ensurepip
-    ok = True
-except Exception:
-    ok = False
-sys.exit(0 if ok else 1)
-PY
-        then echo "$cand"; return 0; fi
-      fi
+
+# ---- Make shared state dir ----
+mkdir -p "$TOKEN_STATE_DIR"
+echo "[INFO] TOKEN_STATE_DIR=$TOKEN_STATE_DIR"
+
+# ---- Phase detection: if no SLURM_ARRAY_TASK_ID, we're in controller (Phase A) ----
+if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+  echo "[A] Controller phase: building buckets and submitting the array"
+
+  # 1) Build list of CSVs
+  mapfile -t all_csvs < <(find "$DATA_ROOT" -type f -name '*.csv' | sort)
+  if (( ${#all_csvs[@]} == 0 )); then
+    echo "[A] No CSV files found under $DATA_ROOT" >&2
+    exit 2
+  fi
+
+  # 2) Bucketize
+  rm -f "$BUCKET_LIST"
+  total="${#all_csvs[@]}"
+  idx=0
+  bucket_idx=0
+  while (( idx < total )); do
+    start=$idx
+    end=$(( idx + BUCKET_SIZE - 1 ))
+    (( end >= total )) && end=$(( total - 1 ))
+    bucket_dir="${OUT_BASE}/bucket_${bucket_idx}"
+    mkdir -p "$bucket_dir"
+    # Write a file list for this bucket
+    bucket_list="${bucket_dir}/files.txt"
+    : > "$bucket_list"
+    for i in $(seq "$start" "$end"); do
+      printf "%s\n" "${all_csvs[$i]}" >> "$bucket_list"
     done
-  fi
-  return 1
-}
-
-# ---------- create venv robustly ----------
-create_venv() {
-  local pybin="$1"
-  echo "[INFO] Creating venv at ${VENV_DIR} using ${pybin}"
-  mkdir -p "${VENV_DIR}"
-  if "${pybin}" -m venv "${VENV_DIR}"; then
-    return 0
-  fi
-  echo "[WARN] 'python -m venv' failed. Trying virtualenv fallback..."
-  if "${pybin}" -m pip --version >/dev/null 2>&1; then
-    "${pybin}" -m pip install --user --upgrade virtualenv >/dev/null 2>&1 || true
-    if command -v virtualenv >/dev/null 2>&1; then
-      virtualenv "${VENV_DIR}" && return 0
-    elif [[ -x "${HOME}/.local/bin/virtualenv" ]]; then
-      "${HOME}/.local/bin/virtualenv" "${VENV_DIR}" && return 0
-    fi
-  fi
-  echo "[ERROR] Could not create a virtual environment. Please load a Python module with venv/ensurepip support."
-  return 1
-}
-
-# ===== Phase A =====
-if [[ -z "${SLURM_ARRAY_TASK_ID+x}" ]]; then
-  echo "[INFO] Phase A: bucketize and submit array"
-  BUCKET_ROOT="${OUT_BASE}/buckets"
-  mkdir -p "${BUCKET_ROOT}"
-  : > "${OUT_BASE}/dirs.txt"
-
-  # Pre-create N bucket dirs
-  for i in $(seq 0 $((N-1))); do
-    mkdir -p "${BUCKET_ROOT}/bucket_${i}"
+    echo "$bucket_dir" >> "$BUCKET_LIST"
+    idx=$(( end + 1 ))
+    bucket_idx=$(( bucket_idx + 1 ))
   done
+  num_buckets=$bucket_idx
+  echo "[A] Bucketized ${total} files into ${num_buckets} buckets @ ${BUCKET_SIZE} each"
 
-  # Round-robin copy CSVs from SRC_DIRS/*/*.csv into buckets
-  i=0
-  shopt -s nullglob
-  for src in ${SRC_DIRS}/*; do
-    for f in "${src}"/*.csv; do
-      b=$(( i % N ))
-      cp -n "$f" "${BUCKET_ROOT}/bucket_${b}/" 2>/dev/null || true
-      i=$(( i + 1 ))
-    done
-  done
-  shopt -u nullglob
-
-  # List bucket paths for the array
-  for i in $(seq 0 $((N-1))); do
-    echo "${BUCKET_ROOT}/bucket_${i}" >> "${OUT_BASE}/dirs.txt"
-  done
-
-  # -------- Safer key parsing & expansion --------
-  : > "${OUT_BASE}/keys.expanded.txt"
-  CLEAN_KEYS=()
-  if [[ -f "${KEYS_FILE}" ]]; then
-    while IFS= read -r line; do
-      line="${line%$'\r'}"
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
-      [[ -n "$line" && "$line" =~ ^gsk_[A-Za-z0-9]+ ]] && CLEAN_KEYS+=("$line")
-    done < "${KEYS_FILE}"
+  # 3) Clean/expand keys file (ignore empty lines or lines starting with '#')
+  if [[ -f "$KEYS_FILE" ]]; then
+    awk 'NF && $0 !~ /^[[:space:]]*#/ {gsub(/\r/,""); print $0}' "$KEYS_FILE" > "$KEYS_EXPANDED"
+  else
+    echo "[A] WARNING: KEYS_FILE not found at $KEYS_FILE — continuing without keys.txt"
+    : > "$KEYS_EXPANDED"
   fi
+  keys_count=$(wc -l < "$KEYS_EXPANDED" || echo 0)
+  echo "[A] keys_count=$keys_count (ok if 0 when using a local model without API keys)"
 
-  if [[ ${#CLEAN_KEYS[@]} -eq 0 ]]; then
-    echo "[ERROR] No valid gsk_ keys found in ${KEYS_FILE}" >&2
-    exit 3
-  fi
-
-  for i in $(seq 0 $((N-1))); do
-    idx=$(( i % ${#CLEAN_KEYS[@]} ))
-    printf '%s\n' "${CLEAN_KEYS[$idx]}" >> "${OUT_BASE}/keys.expanded.txt"
-  done
-  echo "[INFO] Wrote ${N} lines to ${OUT_BASE}/keys.expanded.txt (from ${#CLEAN_KEYS[@]} unique keys)"
-
-  TOTAL="$(wc -l < "${OUT_BASE}/dirs.txt" | tr -d ' ')"
-  echo "[INFO] Prepared ${TOTAL} buckets under ${BUCKET_ROOT}"
-  echo "[INFO] Submitting array 0-$((TOTAL-1))"
-
-  # Choose a safe default concurrency cap. Adjust %X to match your per-key rate budget.
-  sbatch \
-    --array=0-$((TOTAL-1))%200 \
-    --export=ALL,\
-IS_GROQ="${IS_GROQ}",\
-PROJECT_ROOT="${PROJECT_ROOT}",\
-VENV_DIR="${VENV_DIR}",\
-OUT_BASE="${OUT_BASE}",\
-OUT_ROOT="${OUT_ROOT}",\
-SRC_DIRS="${SRC_DIRS}",\
-N="${N}",\
-KEYS_FILE="${KEYS_FILE}",\
-CONTENT_COL="${CONTENT_COL}",\
-TAG_COL="${TAG_COL}",\
-MODEL_NAME="${MODEL_NAME}",\
-PY_SCRIPT="${PY_SCRIPT}",\
-TOKEN_STATE_DIR="${TOKEN_STATE_DIR}",\
-GROQ_RPM="${GROQ_RPM-}",\
-GROQ_TPM="${GROQ_TPM-}",\
-GROQ_RPD="${GROQ_RPD-}" \
-    "$(realpath "$0")" -p "${PY_SCRIPT}"
+  # 4) Submit the array over all buckets (no % cap by default)
+  # NOTE: add %N to throttle if you want, e.g., --array=0-$((num_buckets-1))%${keys_count:-1}
+  sbatch --export=ALL,PROJECT_ROOT="$PROJECT_ROOT",DATA_ROOT="$DATA_ROOT",OUT_BASE="$OUT_BASE",OUT_ROOT="$OUT_ROOT",\
+VENV_ACTIVATE="$VENV_ACTIVATE",PY_SCRIPT="$PY_SCRIPT",KEYS_FILE="$KEYS_FILE",KEYS_EXPANDED="$KEYS_EXPANDED",\
+TOKEN_STATE_DIR="$TOKEN_STATE_DIR",API_BASE_URL="$API_BASE_URL",MODEL_NAME="$MODEL_NAME",CONTENT_COL="$CONTENT_COL",TAG_COL="$TAG_COL",\
+RATE_LIMIT_RPM="$RATE_LIMIT_RPM",RATE_LIMIT_TPM="$RATE_LIMIT_TPM",RATE_LIMIT_RPD="$RATE_LIMIT_RPD",RATE_LIMIT_TPD="$RATE_LIMIT_TPD" \
+         --array=0-$((num_buckets-1)) "$0"
+  echo "[A] Submitted array 0-$((num_buckets-1))"
   exit 0
 fi
 
-# ===== Phase B =====
-echo "[INFO] Phase B: task ${SLURM_ARRAY_TASK_ID}"
+# ---- Phase B (worker) ----
+echo "[B] Worker phase: SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID}"
 
-# Find usable python, create venv if missing
-if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-  PYBIN="$(find_python)" || { echo "[ERROR] No Python with venv+ensurepip found."; exit 127; }
-  create_venv "${PYBIN}" || exit 127
+# 1) Activate venv
+if [[ -f "$VENV_ACTIVATE" ]]; then
+  # shellcheck disable=SC1090
+  source "$VENV_ACTIVATE"
+else
+  echo "[B] WARNING: venv not found at $VENV_ACTIVATE; relying on system Python"
 fi
 
-# Activate venv and install deps
-# shellcheck disable=SC1090
-source "${VENV_DIR}/bin/activate"
-python -m pip install --upgrade pip wheel >/dev/null 2>&1 || true
+# 2) Select bucket dir for this task
+if [[ ! -f "$BUCKET_LIST" ]]; then
+  echo "[B] ERROR: BUCKET_LIST not found at $BUCKET_LIST (controller should have created it)" >&2
+  exit 3
+fi
+bucket_dir="$(sed -n "$((SLURM_ARRAY_TASK_ID+1))p" "$BUCKET_LIST" | tr -d '\r\n')"
+if [[ -z "$bucket_dir" || ! -d "$bucket_dir" ]]; then
+  echo "[B] ERROR: bucket_dir for task ${SLURM_ARRAY_TASK_ID} not found" >&2
+  exit 4
+fi
+echo "[B] bucket_dir=$bucket_dir"
 
-# Load Phase B inputs
-mapfile -t DIRS < "${OUT_BASE}/dirs.txt"
-mapfile -t KEYS_RAW < "${OUT_BASE}/keys.expanded.txt"
-IDX="${SLURM_ARRAY_TASK_ID}"
-TOTAL="${#DIRS[@]}"
-(( IDX >= 0 && IDX < TOTAL )) || { echo "[ERROR] Index $IDX out of range (0..$((TOTAL-1)))"; exit 6; }
-
-DATA_DIR="${DIRS[$IDX]}"
-[[ -d "$DATA_DIR" ]] || { echo "[ERROR] Missing DATA_DIR: $DATA_DIR"; exit 7; }
-
-# -------- Safer key selection (trim/validate) --------
-raw_key="${KEYS_RAW[$IDX]:-}"
-raw_key="${raw_key%$'\r'}"
-raw_key="${raw_key#"${raw_key%%[![:space:]]*}"}"
-raw_key="${raw_key%"${raw_key##*[![:space:]]}"}"
-
-if [[ -z "$raw_key" || ! "$raw_key" =~ ^gsk_[A-Za-z0-9]+$ ]]; then
-  echo "[ERROR] Invalid or empty key at index $IDX in ${OUT_BASE}/keys.expanded.txt" >&2
-  exit 8
+# 3) Choose API key deterministically by task index (ok if keys_count==0 for local model)
+key=""
+if [[ -f "$KEYS_EXPANDED" ]]; then
+  keys_count=$(wc -l < "$KEYS_EXPANDED" || echo 0)
+  if (( keys_count > 0 )); then
+    kidx=$(( SLURM_ARRAY_TASK_ID % keys_count ))
+    key="$(sed -n "$((kidx+1))p" "$KEYS_EXPANDED" | tr -d '\r\n')"
+  fi
+fi
+if [[ -n "$key" ]]; then
+  export API_KEY="$key"          # generic name (no provider prefix)
+else
+  echo "[B] INFO: No API_KEY set (this is fine if using a local model/API that doesn't require a key)"
 fi
 
-export GROQ_API_KEY="$raw_key"
-echo "[KEYS] Using key index ${IDX} (len=${#GROQ_API_KEY})" >&2
+# 4) Per-task output dir and state
+DATA_DIR="$bucket_dir"
+mkdir -p "$OUT_ROOT" "$TOKEN_STATE_DIR"
 
-mkdir -p "${TOKEN_STATE_DIR}"
-export TOKEN_STATE_DIR
+# 5) Diagnostics
+echo "[B] MODEL_NAME=${MODEL_NAME}"
+echo "[B] API_BASE_URL=${API_BASE_URL}"
+echo "[B] RATE_LIMIT_RPM=${RATE_LIMIT_RPM}  RATE_LIMIT_TPM=${RATE_LIMIT_TPM}  RATE_LIMIT_RPD=${RATE_LIMIT_RPD}  RATE_LIMIT_TPD=${RATE_LIMIT_TPD}"
+echo "[B] TOKEN_STATE_DIR=${TOKEN_STATE_DIR}"
+echo "[B] CONTENT_COL='${CONTENT_COL}'  TAG_COL='${TAG_COL}'"
 
-echo "[INFO] DATA_DIR: $DATA_DIR"
-echo "[INFO] IS_GROQ: ${IS_GROQ}"
-echo "[INFO] MODEL: ${MODEL_NAME}"
-echo "[INFO] CONTENT_COL: ${CONTENT_COL}  TAG_COL: ${TAG_COL}"
-
-# Run the Python tagger (uses srun for proper resource binding/logging)
-# NOTE: PY_SCRIPT is the Python file to run (e.g., date_tagger.py).
-exec srun -u python "${PY_SCRIPT}" \
+# 6) Run the Python tagger (uses srun for proper resource binding/logging)
+# NOTE: Your Python should read:
+#   - API_BASE_URL, API_KEY, MODEL_NAME
+#   - RATE_LIMIT_RPM, RATE_LIMIT_TPM, RATE_LIMIT_RPD, RATE_LIMIT_TPD
+#   - TOKEN_STATE_DIR (for cross-worker shared rate-budget files)
+exec srun -u python "$PY_SCRIPT" \
   --data-dir "$DATA_DIR" \
   --content-col "$CONTENT_COL" \
   --tag-col "$TAG_COL" \

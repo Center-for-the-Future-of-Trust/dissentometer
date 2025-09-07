@@ -1,93 +1,100 @@
 #!/usr/bin/env python3
 """
-Sentence-wise date tagging over CSVs, using Groq with a shared token budget.
-- No retry logic. One HTTP attempt per sentence.
-- Coordinated per-minute and per-day limits across processes via a JSON state file.
+Sentence-wise date tagging over CSVs with optional Groq rate limiting.
+- Rate limiting is applied ONLY when IS_GROQ is truthy (true/1/yes/y).
+- Blank GROQ_* env vars never crash parsing; safe fallbacks are used.
+- When IS_GROQ is false/unset: NoopBudget disables rate limiting (no sleeps/state files).
+- Endpoint selection is explicit and logged so timeouts are easy to interpret.
 
-Env knobs (model-aware defaults; override via env):
-  GROQ_RPM, GROQ_TPM, GROQ_RPD, GROQ_TPD
-  TOKEN_STATE_DIR=.rate_limit_state
+Env (Groq mode only):
+  GROQ_API_KEY   - required when IS_GROQ=true
+  GROQ_RPM/TPM/RPD/TPD (optional overrides)
+  TOKEN_STATE_DIR (optional; default .rate_limit_state)
 
-If GROQ returns usage tokens, we record actuals; otherwise we fall back
-to the estimate used for reservation.
+Other envs:
+  MODEL_NAME     - default model (if --model not provided)
+  IS_GROQ        - enable Groq rate limiting and cloud endpoint when truthy
+  LOCAL_CHAT_URL - dev endpoint when IS_GROQ is false (default http://localhost:58112/v1/chat/completions)
 """
 
-import argparse, csv, hashlib, json, os, re, sys, time
-import sys
-from collections import deque
-from contextlib import contextmanager
+from __future__ import annotations
+import os, re, sys, csv, io, json, time, math, hashlib, argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque, List, Optional, Tuple
+from typing import List, Tuple, Optional
 
-import pandas as pd
-import requests
-import fcntl  # POSIX file locking
+# POSIX file locking
+import fcntl
 
-SYSTEM_PROMPT = """Your job is to tag dates and time periods in text.
-Insert <DATE>…</DATE> around every date or time-period expression. Return the original text
-with only the tags inserted. Do not add any commentary.
+# ---------- Helpers ----------
 
-Examples:
-- Specific days (e.g., 2 March 2012, March 2012)
-- Years and eras (e.g., 1992, 300 BC/BCE, AD/CE 79, AH 622)
-- Decades with qualifiers (e.g., 1920s, late 1990s, early 2000s)
-- Centuries numeric or spelled (e.g., 20th century, eighteenth century, mid-18th century)
-- Ranges (e.g., 1880–1889, 1000 BCE to 200 AD, between 1914 and 1918, 1945/46)
-- Seasons/quarters with a year (e.g., winter 1942, Q4 2020)
-- Reign/activity markers (e.g., r. 1558–1603, fl. 1510s, c./circa 1200)
-- Named periods/dynasties/eras (e.g., Qing Dynasty, Tokugawa period, Bronze Age, Middle Ages, Heisei era, Jurassic period).
-"""
+def _parse_bool(s: str) -> bool:
+    return (s or "").strip().lower() in {"1", "true", "yes", "y"}
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    try:
+        return int(float(raw)) if raw.strip() else default
+    except Exception:
+        return default
 
 DATEY_PATTERN = re.compile(
     r"""(?ix)
-    \b\d{3,4}s?\b                     # 3- or 4-digit numbers, with optional trailing 's' (e.g., 1920, 1920s)
+    \b\d{3,4}\b                       # 3- or 4-digit numbers (likely years)
     |
     \b(?:AD|CE|BC|BCE)\b              # era markers
     |
     \b(?:century|centuries)\b         # century/centuries
     |
     \b(?:dynasty|period|era)\b        # named historical periods
-    """, re.UNICODE,
+    |
+    \b(?:\d{3,4}s)\b                  # decades like 1960s
+    """,
+    re.UNICODE,
 )
 
-SENT_SPLIT = re.compile(r"([.!?…؛।。！？]+)(\s+|$)")
+def approx_token_count(text: str, char_per_token: int = 4) -> int:
+    if not text:
+        return 0
+    return max(1, math.ceil(len(text) / max(1, char_per_token)))
 
 def split_sentences_keep_delims(text: str) -> List[Tuple[str, str]]:
-    parts: List[Tuple[str, str]] = []
+    """
+    Split by sentence punctuation but keep delimiters (., !, ? and quotes).
+    Returns list of (sentence_core, trailing_delim) pairs.
+    """
+    if not text:
+        return []
+    out: List[Tuple[str, str]] = []
     start = 0
-    for m in SENT_SPLIT.finditer(text):
-        end = m.start()
-        core = text[start:end]
-        delim = m.group(1) + (m.group(2) or "")
-        parts.append((core, delim))
-        start = m.end()
+    for m in re.finditer(r'[.!?]+[\)\]\}"\']*', text):
+        end = m.end()
+        sentence = text[start:end]
+        md = re.search(r'([.!?]+[\)\]\}"\']*)\s*$', sentence)
+        if md:
+            tail = md.group(1)
+            core = sentence[:-len(tail)]
+            out.append((core, tail))
+        else:
+            out.append((sentence, ""))
+        start = end
     if start < len(text):
-        parts.append((text[start:], ""))
-    return parts
+        out.append((text[start:], ""))
+    return out
 
-def estimate_tokens(s: str, char_per_token: int = 4) -> int:
-    s = s or ""
-    return max(1, len(s) // max(1, char_per_token))
+# ---------- API / prompt building ----------
 
-def _strip_code_fences(s: str) -> str:
-    s = (s or "").strip()
-    if s.startswith("```") and s.endswith("```"):
-        inner = s.strip("`").strip()
-        if "\n" in inner:
-            first, rest = inner.split("\n", 1)
-            if first.strip().lower() in {"text","plain","txt","markdown","md","html","xml"}:
-                return rest.strip()
-        return inner
-    return s
+SYSTEM_PROMPT = (
+    "You are a helpful assistant for tagging dates. "
+    "Wrap exactly one date mention per sentence with <DATE>...</DATE>. "
+    "Return the sentence with only that markup added; do not rephrase."
+)
 
-def should_tag(sentence: str) -> bool:
-    if not sentence or not sentence.strip():
-        return False
-    if "<DATE>" in sentence and "</DATE>" in sentence:
-        return False
-    return bool(DATEY_PATTERN.search(sentence))
+def build_user_prompt(sentence: str) -> str:
+    return (
+        "Tag the primary date in this sentence with <DATE> and </DATE>.\n\n"
+        f"Sentence: {sentence}"
+    )
 
 @dataclass
 class Limits:
@@ -97,145 +104,156 @@ class Limits:
     tpd: int
 
 class TokenBudget:
+    """
+    Coordinated token/request budget across many processes using a small JSON state file.
+    The file path should be unique per (api_key, model) tuple to avoid collisions.
+    """
     def __init__(self, state_path: Path, limits: Limits):
-        self.state_path = state_path
-        self.limits = limits
+        self.state_path = Path(state_path)
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.limits = limits
+        if not self.state_path.exists():
+            init = {
+                "minute": {"toks": 0, "reqs": 0, "ts": int(time.time())},
+                "day": {"toks": 0, "reqs": 0, "ts": int(time.time())},
+            }
+            self._atomic_write(init)
 
-    @contextmanager
-    def _locked_state(self):
-        with open(self.state_path, "a+b") as f:
+    def _atomic_write(self, obj: dict) -> None:
+        tmp = self.state_path.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            f.write(json.dumps(obj).encode("utf-8"))
+        os.replace(tmp, self.state_path)
+
+    def _read_locked(self) -> tuple[dict, any]:
+        with open(self.state_path, "rb+") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            f.seek(0)
-            raw = f.read()
-            if not raw:
-                state = {"minute": {"events": []}, "day": {"date": datetime.now(timezone.utc).date().isoformat(), "tokens": 0, "requests": 0}}
-            else:
-                try:
-                    state = json.loads(raw.decode("utf-8"))
-                except Exception:
-                    state = {"minute": {"events": []}, "day": {"date": datetime.now(timezone.utc).date().isoformat(), "tokens": 0, "requests": 0}}
-            yield state, f
-            f.seek(0); f.truncate(0)
-            f.write(json.dumps(state).encode("utf-8"))
-            f.flush()
-            os.fsync(f.fileno())
-            fcntl.flock(f, fcntl.LOCK_UN)
+            raw = f.read().decode("utf-8") or "{}"
+            state = json.loads(raw) if raw.strip() else {}
+            if "minute" not in state or "day" not in state:
+                state = {
+                    "minute": {"toks": 0, "reqs": 0, "ts": int(time.time())},
+                    "day": {"toks": 0, "reqs": 0, "ts": int(time.time())},
+                }
+            return state, f
 
-    def _purge_and_roll_day(self, state):
-        now = time.time()
-        one_min_ago = now - 60.0
-        events = [(ts, tok, req) for (ts, tok, req) in state["minute"]["events"] if ts >= one_min_ago]
-        state["minute"]["events"] = events
-        today = datetime.now(timezone.utc).date().isoformat()
-        if state["day"].get("date") != today:
-            state["day"] = {"date": today, "tokens": 0, "requests": 0}
+    def _write_locked(self, f, state: dict) -> None:
+        f.seek(0); f.truncate(0)
+        f.write(json.dumps(state).encode("utf-8"))
+        f.flush(); os.fsync(f.fileno())
+        fcntl.flock(f, fcntl.LOCK_UN)
 
-    def _minute_totals(self, state):
-        toks = sum(e[1] for e in state["minute"]["events"])
-        reqs = sum(e[2] for e in state["minute"]["events"])
-        return toks, reqs
+    def _maybe_reset_windows(self, state: dict, now: int) -> None:
+        if now - state["minute"]["ts"] >= 60:
+            state["minute"] = {"toks": 0, "reqs": 0, "ts": now}
+        if now - state["day"]["ts"] >= 86400:
+            state["day"] = {"toks": 0, "reqs": 0, "ts": now}
 
-    def reserve(self, est_tokens: int, est_requests: int = 1, mode: str = "sleep", poll_s: float = 0.25) -> bool:
-        est_tokens = max(1, int(est_tokens))
-        est_requests = max(1, int(est_requests))
+    def _would_exceed(self, state: dict, add_toks: int, add_reqs: int) -> tuple[bool, float]:
+        now = int(time.time())
+        self._maybe_reset_windows(state, now)
+        # minute
+        if state["minute"]["reqs"] + add_reqs > self.limits.rpm:
+            return True, max(0.0, 60 - (now - state["minute"]["ts"]))
+        if state["minute"]["toks"] + add_toks > self.limits.tpm:
+            return True, max(0.0, 60 - (now - state["minute"]["ts"]))
+        # day
+        if state["day"]["reqs"] + add_reqs > self.limits.rpd:
+            return True, max(0.0, 86400 - (now - state["day"]["ts"]))
+        if state["day"]["toks"] + add_toks > self.limits.tpd:
+            return True, max(0.0, 86400 - (now - state["day"]["ts"]))
+        return False, 0.0
+
+    def reserve(self, add_toks: int, add_reqs: int) -> bool:
         while True:
-            with self._locked_state() as (state, _f):
-                self._purge_and_roll_day(state)
-                min_tokens, min_requests = self._minute_totals(state)
-                day_tokens = state["day"]["tokens"]
-                day_requests = state["day"]["requests"]
+            state, f = self._read_locked()
+            exceed, sleep_for = self._would_exceed(state, add_toks, add_reqs)
+            if not exceed:
+                state["minute"]["toks"] += add_toks
+                state["minute"]["reqs"] += add_reqs
+                state["day"]["toks"] += add_toks
+                state["day"]["reqs"] += add_reqs
+                self._write_locked(f, state)
+                return True
+            else:
+                fcntl.flock(f, fcntl.LOCK_UN)
+                time.sleep(min(sleep_for, 2.0))
 
-                can_minute = (min_tokens + est_tokens) <= self.limits.tpm and (min_requests + est_requests) <= self.limits.rpm
-                can_day = (day_tokens + est_tokens) <= self.limits.tpd and (day_requests + est_requests) <= self.limits.rpd
+    def commit(self, add_toks: int, add_reqs: int) -> None:
+        pass
 
-                if can_minute and can_day:
-                    state["minute"]["events"].append([time.time(), est_tokens, est_requests])
-                    state["day"]["tokens"] += est_tokens
-                    state["day"]["requests"] += est_requests
-                    return True
+class NoopBudget:
+    def __init__(self, *_, **__): pass
+    def reserve(self, *_, **__): return True
+    def commit(self, *_, **__):  pass
 
-                if mode == "skip":
-                    return False
+# ---------- Tagging ----------
 
-                now = time.time()
-                soonest = None
-                for ts, tok, req in state["minute"]["events"]:
-                    free_in = max(0.0, (ts + 60.0) - now)
-                    if soonest is None or free_in < soonest:
-                        soonest = free_in
-                time.sleep(max(soonest or 0.25, poll_s))
+def should_tag(sentence: str) -> bool:
+    if not sentence or not sentence.strip():
+        return False
+    if "<DATE>" in sentence and "</DATE>" in sentence:
+        return False
+    return bool(DATEY_PATTERN.search(sentence))
 
-    def commit(self, actual_tokens: Optional[int] = None, actual_requests: Optional[int] = None):
-        with self._locked_state() as (state, _f):
-            self._purge_and_roll_day(state)
-            if not state["minute"]["events"]:
-                return
-            ts, est_tok, est_req = state["minute"]["events"][-1]
-            atok = max(1, int(actual_tokens)) if actual_tokens is not None else est_tok
-            areq = max(1, int(actual_requests)) if actual_requests is not None else est_req
-            delta_tok = atok - est_tok
-            delta_req = areq - est_req
-            state["minute"]["events"][-1] = [ts, atok, areq]
-            state["day"]["tokens"] += delta_tok
-            state["day"]["requests"] += delta_req
-
-_SESSION = requests.Session()
-
-def groq_chat_once(query: str, model: str, system_prompt: Optional[str], timeout: float = 60.0):
+def groq_chat_once(query: str, model: str, system_prompt: Optional[str], timeout: float = 90.0):
+    import urllib.request
+    is_groq = _parse_bool(os.getenv("IS_GROQ", ""))
     api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        print("[API ] GROQ_API_KEY is not set", file=sys.stderr)
-        return None, None
 
-    # url = "https://api.groq.com/openai/v1/chat/completions"
-    # headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    url = "http://localhost:58112/v1/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    if is_groq:
+        if not api_key:
+            print("[API ] GROQ_API_KEY is not set", file=sys.stderr)
+            return None, None
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        mode = "Groq cloud"
+    else:
+        url = os.getenv("LOCAL_CHAT_URL", "http://localhost:58112/v1/chat/completions")
+        headers = {"Content-Type": "application/json"}
+        mode = "Local/dev"
+
+    # Explicit endpoint log
+    print(f"[API ] Sending request to {mode} endpoint: {url}", file=sys.stderr)
 
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": query})
-    payload = {"model": model, "messages": messages, "temperature": 0.0}
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 512,
+    }
 
     try:
-        resp = _SESSION.post(url, json=payload, headers=headers, timeout=timeout)
-        if resp.status_code != 200:
-            print(f"[API ] status={resp.status_code} body={resp.text[:500]}", file=sys.stderr)
-            return None, None
-        data = resp.json()
-        content = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
-        content = _strip_code_fences(content or "")
-        usage = data.get("usage", {})
-        total_tokens = usage.get("total_tokens")
-        return (content or None), total_tokens
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"[API ] exception={e}", file=sys.stderr)
+        print(f"[API ] exception while calling {mode} endpoint: {e}", file=sys.stderr)
         return None, None
 
-def tag_sentence_once(s: str, *, model: str, budget: TokenBudget, char_per_token: int) -> str:
-    est_user = estimate_tokens(s, char_per_token)
-    est_sys  = estimate_tokens(SYSTEM_PROMPT, char_per_token)
-    est_assistant = max(64, est_user // 2)
-    est_total = est_user + est_sys + est_assistant
+    try:
+        content = raw["choices"][0]["message"]["content"]
+        usage = raw.get("usage", {})
+        prompt_tokens = int(usage.get("prompt_tokens", 0))
+        completion_tokens = int(usage.get("completion_tokens", 0))
+        total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens))
+    except Exception:
+        content = None
+        total_tokens = 0
+    return content, total_tokens
 
-    ok = budget.reserve(est_total, est_requests=1, mode="sleep")
-    if not ok:
-        return s
+def tag_sentence_once(sentence: str, model: str, budget: TokenBudget, char_per_token: int = 4) -> str:
+    approx_in = approx_token_count(sentence, char_per_token=char_per_token) + 64  # prompt framing
+    budget.reserve(approx_in, 1)
+    query = build_user_prompt(sentence)
+    out, used = groq_chat_once(query, model=model, system_prompt=SYSTEM_PROMPT)
+    return sentence if not out else out
 
-    content, actual_total = groq_chat_once(s, model, SYSTEM_PROMPT)
-    budget.commit(actual_tokens=actual_total, actual_requests=1)
-
-    return content if content else s
-
-def process_cell(cell: Optional[str], *, model: str, budget: TokenBudget, char_per_token: int) -> str:
-    if cell is None:
-        return ""
-    text = str(cell)
-    if not text.strip():
-        return text
-
+def tag_text(text: str, model: str, budget: TokenBudget, char_per_token: int = 4) -> str:
     pieces = split_sentences_keep_delims(text)
     out: List[str] = []
     for core, tail in pieces:
@@ -245,25 +263,20 @@ def process_cell(cell: Optional[str], *, model: str, budget: TokenBudget, char_p
         out.append(s + tail)
     return "".join(out)
 
+# ---------- Main ----------
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Sentence-wise date tagging (no retries) with shared token budget.")
+    p = argparse.ArgumentParser(description="Sentence-wise date tagging (no retries) with optional Groq rate limiting.")
     p.add_argument("--data-dir", required=True, help="Directory containing CSV files.")
     p.add_argument("--content-col", default="English translation", help="Column to read text from.")
     p.add_argument("--tag-col", default="date_tagged", help="New column to write tagged text into.")
-    #p.add_argument("--model", default="llama-3.3-70b-versatile", help="Groq model name.")
-    
     default_model = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
     p.add_argument("--model", default=default_model, help="Groq model name.")
-    
     p.add_argument("--encoding", default="utf-8", help="CSV encoding.")
     p.add_argument("--char-per-token", type=int, default=4, help="Token estimate (~chars per token).")
     p.add_argument("--file-glob", default="*.csv", help="Glob for input files (non-recursive).")
     p.add_argument("--out-root", default=None, help="If set, write outputs under this root; else <data-dir>/date_tagged/.")
     args = p.parse_args()
-
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        print("ERROR: GROQ_API_KEY is not set.", file=sys.stderr); sys.exit(2)
 
     data_dir = Path(args.data_dir)
     if not data_dir.is_dir():
@@ -272,66 +285,103 @@ def main() -> None:
     out_root = (Path(args.out_root) / data_dir.name) if args.out_root else (data_dir / "date_tagged")
     out_root.mkdir(parents=True, exist_ok=True)
 
-    MODEL_LIMIT_DEFAULTS = {
-        "llama-3.3-70b-versatile": dict(rpm=1000, tpm=300000, rpd=500000, tpd=10**12),
-        "llama-3.1-8b-instant":    dict(rpm=1000, tpm=250000, rpd=500000, tpd=10**12),
-    }
-    md = MODEL_LIMIT_DEFAULTS.get(args.model, None)
+    is_groq = _parse_bool(os.getenv("IS_GROQ", ""))
 
-    rpm_default = str((md or {}).get("rpm", 30))
-    tpm_default = str((md or {}).get("tpm", 6000))
-    rpd_default = str((md or {}).get("rpd", 14400))
-    tpd_default = str((md or {}).get("tpd", 500000))
+    # Build budget ONLY if IS_GROQ is truthy; otherwise use NoopBudget.
+    if is_groq:
+        # Model-aware defaults (Groq-only)
+        MODEL_LIMIT_DEFAULTS = {
+            "llama-3.3-70b-versatile": dict(rpm=1000, tpm=300000, rpd=500000, tpd=10**12),
+            "llama-3.1-8b-instant":    dict(rpm=1000, tpm=250000, rpd=500000, tpd=10**12),
+        }
+        md = MODEL_LIMIT_DEFAULTS.get(args.model, None)
+        rpm_default = (md or {}).get("rpm", 30)
+        tpm_default = (md or {}).get("tpm", 6000)
+        rpd_default = (md or {}).get("rpd", 14400)
+        tpd_default = (md or {}).get("tpd", 500000)
 
-    limits = Limits(
-        rpm=int(float(os.getenv("GROQ_RPM", rpm_default))),
-        tpm=int(float(os.getenv("GROQ_TPM", tpm_default))),
-        rpd=int(float(os.getenv("GROQ_RPD", rpd_default))),
-        tpd=int(float(os.getenv("GROQ_TPD", tpd_default))),
-    )
-
-    token_state_dir = Path(os.getenv("TOKEN_STATE_DIR", ".rate_limit_state"))
-    key_id = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
-    model_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", args.model)
-    state_path = token_state_dir / key_id / f"budget_{model_id}.json"
-    budget = TokenBudget(state_path, limits)
-
-    csvs = sorted(data_dir.glob(args.file_glob))
-    if not csvs:
-        print(f"[WARN] No files matching {args.file_glob} in {data_dir}")
-        return
-
-    print(f"[INFO] DATA_DIR={data_dir}")
-    print(f"[INFO] Model={args.model}")
-    print(f"[INFO] Limits: RPM={limits.rpm} TPM={limits.tpm} RPD={limits.rpd} TPD={limits.tpd}")
-    print(f"[INFO] Token state: {state_path}")
-    print(f"[INFO] Content col='{args.content_col}' → Tag col='{args.tag_col}'")
-    print(f"[INFO] Writing outputs under: {out_root}")
-    print(f"[INFO] Found {len(csvs)} CSV file(s).")
-
-    for in_path in csvs:
-        base = in_path.stem
-        out_path = out_root / f"{base}_date_tagged.csv"
-        try:
-            df = pd.read_csv(in_path, dtype=str, encoding=args.encoding)
-        except Exception as e:
-            print(f"[SKIP] Could not read {in_path}: {e}", file=sys.stderr); continue
-
-        if args.content_col not in df.columns:
-            print(f"[SKIP] Missing column '{args.content_col}' in {in_path}", file=sys.stderr); continue
-
-        print(f"[RUN ] {in_path.name} → {out_path.name}")
-        df[args.tag_col] = df[args.content_col].apply(
-            lambda cell: process_cell(cell, model=args.model, budget=budget, char_per_token=args.char_per_token)
+        limits = Limits(
+            rpm=_env_int("GROQ_RPM", rpm_default),
+            tpm=_env_int("GROQ_TPM", tpm_default),
+            rpd=_env_int("GROQ_RPD", rpd_default),
+            tpd=_env_int("GROQ_TPD", tpd_default),
         )
+        token_state_dir = Path(os.getenv("TOKEN_STATE_DIR", ".rate_limit_state"))
+        api_key = os.getenv("GROQ_API_KEY", "")
+        key_id = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16] if api_key else "nokey"
+        model_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", args.model)
+        state_path = token_state_dir / key_id / f"budget_{model_id}.json"
+        budget = TokenBudget(state_path, limits)
+        rl = True
+    else:
+        budget = NoopBudget()
+        rl = False
+
+    # Logging
+    print(f"[INFO] Model={args.model}")
+    print(f"[INFO] IS_GROQ={is_groq}")
+    if rl:
+        print(f"[INFO] Limits: RPM={limits.rpm} TPM={limits.tpm} RPD={limits.rpd} TPD={limits.tpd}")
+        print(f"[INFO] Token state: {state_path}")
+    else:
+        print(f"[INFO] Rate limiting: disabled (NoopBudget)")
+
+    # Process CSVs
+    files = sorted(data_dir.glob(args.file_glob))
+    if not files:
+        print(f"[WARN] No files matching {args.file_glob} in {data_dir}", file=sys.stderr)
+
+    for fp in files:
+        rel = fp.relative_to(data_dir)
+        out_csv = out_root / rel
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            df.to_csv(out_path, index=False, encoding=args.encoding, quoting=csv.QUOTE_MINIMAL)
-            print(f"[OK  ] Wrote: {out_path}")
-        except Exception as e:
-            print(f"[FAIL] Could not write {out_path}: {e}")
+            with open(fp, "rb") as f:
+                raw = f.read()
+            try:
+                txt = raw.decode(args.encoding)
+            except UnicodeDecodeError:
+                txt = raw.decode("utf-8", errors="replace")
 
-    print("[DONE] All files processed.")
+            buf = io.StringIO(txt)
+            rdr = csv.DictReader(buf)
+            rows = list(rdr)
+            if not rows:
+                with open(out_csv, "w", newline="", encoding="utf-8") as w:
+                    w.write(txt)
+                print(f"[PASS] {rel} (empty)")
+                continue
+
+            if args.content_col not in rows[0]:
+                print(f"[WARN] Missing column '{args.content_col}' in {rel}; copying through.", file=sys.stderr)
+                with open(out_csv, "w", newline="", encoding="utf-8") as w:
+                    w.write(txt)
+                continue
+
+            # ensure tag column
+            fieldnames = list(rows[0].keys())
+            if args.tag_col not in fieldnames:
+                fieldnames.append(args.tag_col)
+
+            # transform
+            for r in rows:
+                content = r.get(args.content_col, "")
+                tagged = tag_text(content, model=args.model, budget=budget, char_per_token=args.char_per_token)
+                r[args.tag_col] = tagged
+
+            # write
+            with open(out_csv, "w", newline="", encoding="utf-8") as w:
+                wr = csv.DictWriter(w, fieldnames=fieldnames)
+                wr.writeheader()
+                for r in rows:
+                    wr.writerow(r)
+
+            print(f"[OK  ] {rel} -> {out_csv.relative_to(out_root)}")
+        except Exception as e:
+            print(f"[ERR ] {rel}: {e}", file=sys.stderr)
+
+    print("Done; files processed.")
 
 if __name__ == "__main__":
     main()
