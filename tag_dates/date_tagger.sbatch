@@ -44,13 +44,13 @@ istrue() {
 : "${MODEL_NAME:=llama-3.1-8b-instant}"
 : "${CONTENT_COL:=English translation}"
 : "${TAG_COL:=date_tagged}"
+: "${MAX_PARALLEL_ARRAY_TASKS:=20}"
 
 # Bucketing controls
 : "${BUCKET_SIZE:=300}"       # number of CSVs per bucket (≈ one array task)
 : "${BUCKET_LIST:=${PROJECT_ROOT}/bucket.list}"
 
-# ---- ALWAYS-ON GENERIC RATE LIMIT VARS ----
-# Preferred new names (what your Python should read):
+# Always on rate limiting
 : "${RATE_LIMIT_RPM:=30}"        # requests per minute per key
 : "${RATE_LIMIT_TPM:=6000}"      # tokens per minute per key
 : "${RATE_LIMIT_RPD:=14400}"     # requests per day per key
@@ -132,15 +132,31 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
   keys_count=$(wc -l < "$KEYS_EXPANDED" || echo 0)
   echo "[A] keys_count=$keys_count (ok if 0 when using a local model without API keys)"
 
-  # 4) Submit the array over all buckets (no % cap by default)
-  # NOTE: add %N to throttle if you want, e.g., --array=0-$((num_buckets-1))%${keys_count:-1}
-  sbatch --export=ALL,PROJECT_ROOT="$PROJECT_ROOT",DATA_ROOT="$DATA_ROOT",OUT_BASE="$OUT_BASE",OUT_ROOT="$OUT_ROOT",\
-VENV_ACTIVATE="$VENV_ACTIVATE",PY_SCRIPT="$PY_SCRIPT",KEYS_FILE="$KEYS_FILE",KEYS_EXPANDED="$KEYS_EXPANDED",\
-TOKEN_STATE_DIR="$TOKEN_STATE_DIR",API_BASE_URL="$API_BASE_URL",MODEL_NAME="$MODEL_NAME",CONTENT_COL="$CONTENT_COL",TAG_COL="$TAG_COL",\
-RATE_LIMIT_RPM="$RATE_LIMIT_RPM",RATE_LIMIT_TPM="$RATE_LIMIT_TPM",RATE_LIMIT_RPD="$RATE_LIMIT_RPD",RATE_LIMIT_TPD="$RATE_LIMIT_TPD" \
-         --array=0-$((num_buckets-1)) "$0"
-  echo "[A] Submitted array 0-$((num_buckets-1))"
-  exit 0
+  # 4) Submit the array over all buckets, with a concurrency cap
+  sbatch \
+    --export=ALL,\
+    PROJECT_ROOT="$PROJECT_ROOT",\
+    DATA_ROOT="$DATA_ROOT",\
+    OUT_BASE="$OUT_BASE",\
+    OUT_ROOT="$OUT_ROOT",\
+    VENV_ACTIVATE="$VENV_ACTIVATE",\
+    PY_SCRIPT="$PY_SCRIPT",\
+    KEYS_FILE="$KEYS_FILE",\
+    KEYS_EXPANDED="$KEYS_EXPANDED",\
+    TOKEN_STATE_DIR="$TOKEN_STATE_DIR",\
+    API_BASE_URL="$API_BASE_URL",\
+    MODEL_NAME="$MODEL_NAME",\
+    CONTENT_COL="$CONTENT_COL",\
+    TAG_COL="$TAG_COL",\
+    RATE_LIMIT_RPM="$RATE_LIMIT_RPM",\
+    RATE_LIMIT_TPM="$RATE_LIMIT_TPM",\
+    RATE_LIMIT_RPD="$RATE_LIMIT_RPD",\
+    RATE_LIMIT_TPD="$RATE_LIMIT_TPD" \
+    --array=0-$((num_buckets-1))%${MAX_PARALLEL_ARRAY_TASKS} \
+    "$0"
+
+echo "[A] Submitted array 0-$((num_buckets-1)) with max ${MAX_PARALLEL_ARRAY_TASKS} concurrent tasks"
+exit 0
 fi
 
 # ---- Phase B (worker) ----
