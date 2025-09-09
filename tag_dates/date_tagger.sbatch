@@ -18,6 +18,8 @@ set -euo pipefail
 istrue() { case "${1,,}" in true|1|yes|y) return 0 ;; *) return 1 ;; esac; }
 [ -f /etc/profile.d/modules.sh ] && source /etc/profile.d/modules.sh || true
 
+: "${IS_GROQ:=""}"
+
 # ---- Config (override any of these at submit time with --export=ALL,VAR=value) ----
 : "${PROJECT_ROOT:=/local/scratch/sbuongi/date_tagger}"
 : "${DATA_ROOT:=/local/scratch/sbuongi/copied_data}"   # holds CSVs (recursively)
@@ -32,8 +34,10 @@ istrue() { case "${1,,}" in true|1|yes|y) return 0 ;; *) return 1 ;; esac; }
 # API target + model
 #: "${API_BASE_URL:=https://api.openai.com/v1/chat/completions}"
 : "${API_BASE_URL:=http://localhost:58112/v1/chat/completions}"
+#: "${API_BASE_URL:=https://api.groq.com/openai/v1/chat/completions}"
 #: "${MODEL_NAME:=llama-3.1-8b-instant}"   # example for Groq
-: "${MODEL_NAME:=gpt-oss:20b}"             # example local model (e.g., llama3.1:8b)
+#: "${MODEL_NAME:=gpt-oss:20b}"             # example local model (e.g., llama3.1:8b)
+: "${MODEL_NAME:=llama3.1:8b}"
 
 # CSV fields + file matching
 : "${CONTENT_COL:=English translation}"
@@ -43,8 +47,8 @@ istrue() { case "${1,,}" in true|1|yes|y) return 0 ;; *) return 1 ;; esac; }
 : "${CHAR_PER_TOKEN:=4}"
 
 # Concurrency
-: "${MAX_PARALLEL_ARRAY_TASKS:=10}"   # SLURM array concurrency cap
-: "${MAX_CONCURRENCY:=8}"            # per-task async concurrency for Python
+: "${MAX_PARALLEL_ARRAY_TASKS:=9}"   # SLURM array concurrency cap
+: "${MAX_CONCURRENCY:=5}"            # per-task async concurrency for Python
 export MAX_CONCURRENCY
 
 # Guard toggles (NEW)
@@ -89,7 +93,8 @@ if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
   echo "[A] Controller: DATA_ROOT=$DATA_ROOT"
 
   # 1) Find CSVs (recursive, case-sensitive *.csv)
-  mapfile -t all_csvs < <(find "$DATA_ROOT" -type f -name '*.csv' | sort)
+  #mapfile -t all_csvs < <(find "$DATA_ROOT" -type f -name '*.csv' | sort)
+  mapfile -t all_csvs < <(find -L "$DATA_ROOT" -type f -name "${FILE_GLOB:-*.csv}" | sort)
   if (( ${#all_csvs[@]} == 0 )); then
     echo "[A] No CSV files found under $DATA_ROOT" >&2
     exit 2
@@ -185,6 +190,7 @@ fi
 if [[ -n "$key" ]]; then
   export API_KEY="$key"
   export OPENAI_API_KEY="$key"
+  export GROQ_API_KEY="$key"
 else
   echo "[B] INFO: No API_KEY set"
 fi

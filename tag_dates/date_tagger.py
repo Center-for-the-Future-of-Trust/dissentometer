@@ -33,6 +33,7 @@ def _env_int(name: str, default: int) -> int:
 
 def _env_str(name: str, default: str) -> str:
     raw = os.getenv(name, "")
+    raw = raw.strip()
     return raw if raw.strip() else default
 
 DATEY_PATTERN = re.compile(
@@ -180,7 +181,7 @@ def should_tag(sentence: str) -> bool:
         return False
     return bool(DATEY_PATTERN.search(sentence))
 
-async def groq_chat_once_async(query: str, model: str, system_prompt: Optional[str], session: "aiohttp.ClientSession", timeout: float = 90.0):
+async def groq_chat_once_async(query: str, model: str, system_prompt: Optional[str], session: "aiohttp.ClientSession", timeout: float = 150.0):
     is_groq = _parse_bool(os.getenv("IS_GROQ", ""))
     api_key = os.getenv("GROQ_API_KEY")
     if is_groq:
@@ -282,6 +283,10 @@ async def tag_text_async(text: str, model: str, budget, char_per_token: int = 4,
     out_parts: List[str] = []
     for i, core_out in enumerate(results):
         out_parts.append(core_out + tails[i])
+
+    # very confusing - cores are sentnece_fragments
+    print(f"[LOG] {len(cores)} sentence chunks for file generated at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
     return "".join(out_parts)
 
 # ---------- Main ----------
