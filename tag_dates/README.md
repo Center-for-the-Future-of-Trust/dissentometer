@@ -18,14 +18,17 @@ Log the number of sentence_cores sent to the LLM
 
 
 
-
-
+Bucket the data and create number of shards: 
+```
 python3 split_and_bucket_updated.py \
   --data-root /local/scratch/sbuongi/date_tagger/copied_data \
   --out-base  /local/scratch/sbuongi/date_tagger/run_split3 \
   --file-glob '*.csv' \
   --bucket-size 300 \
   --num-shards 3
+```
+
+Use all ports 
 
 ```
 BASE=/local/scratch/sbuongi/date_tagger/run_split3
