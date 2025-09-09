@@ -63,3 +63,10 @@ OUT_ROOT="$BASE/shard3/outputs",\
 BUCKET_LIST="$BASE/shard3/bucket.list" \
   date_tagger.sbatch
 ```
+
+each shard will have: 
+
+buckets
+inputs
+outputs 
+bucket.list 
