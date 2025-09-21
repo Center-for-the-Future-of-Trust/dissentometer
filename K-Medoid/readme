@@ -1,1 +1,59 @@
+Timeline Clustering with K-Medoids
 
+This repository contains two scripts that combine distance matrix clustering (K-Medoids) with historical timeline density visualization (KDE plots). The scripts help analyze how clusters of languages (from Wikipedia-derived corpora) align in time.
+
+Script 1: Timeline Plots (1800–2025)
+
+Purpose
+
+Clusters languages using K-Medoids on precomputed Wasserstein distance matrices.
+
+Extracts date mentions (only between 1800–2025).
+
+Removes global outliers (furthest 10% from temporal cluster medians).
+
+Plots KDE timelines of clusters in:
+
+Absolute time (x-axis = actual years).
+
+Relative time (x-axis = years relative to each medoid’s center).
+
+Output
+
+PNG plots stored in ~/Desktop/timeline_plots_1800_2025/
+
+Script 2: Timeline Plots (−500–2025)
+
+File: timeline_kmedoids_full.py
+
+Purpose
+
+Same as Script 1, but:
+
+Accepts wider historical span (−500 to 2025).
+
+Useful for BCE/early historical timelines.
+
+Key Features (Both Scripts)
+
+Clustering
+
+Uses KMedoids (sklearn_extra.cluster).
+
+Input: Wasserstein distance matrix.
+
+Number of clusters = configurable (n_clusters=6).
+
+Outlier Removal
+
+For each cluster, compute median year.
+
+Calculate deviation of each language’s median year from cluster median.
+
+Remove top 10% outliers (outlier_frac=0.1).
+
+Visualization
+
+Absolute plots: KDE of mentions aligned on timeline (1800–2025 or −500–2025).
+
+Relative plots: KDE of mentions aligned to cluster medoid’s center (centered at 0).
