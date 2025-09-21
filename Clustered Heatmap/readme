@@ -1,1 +1,60 @@
+README: Clustered Heatmap Generators
 
+This repository contains two Python scripts that generate clustered heatmaps for date mentions across languages in the History of Sports, History of Ideologies, and Historical Objects Wikipedia corpora. Both scripts rely on pre-processed CSV files containing parsed date information and DBSCAN-based clustering results. The scripts produce language-by-year heatmaps, grouped and separated by clusters, to visualize temporal coverage patterns.
+
+1. Script: clustered_heatmap.py
+Purpose
+
+This script generates clustered heatmaps for multiple time windows (1700–2025, 1800–2025, 1900–2025, 1980–2025).
+The heatmaps display normalized date mentions by language, grouped into clusters. White gap rows are inserted between clusters for visual clarity.
+
+Key Features
+
+Time Windows: Adjustable ranges (default: 1700–2025, 1800–2025, 1900–2025, 1980–2025).
+
+Scopes: Uses different clustering scopes (top10, top25, top50).
+
+Cluster Gaps: White separator rows between clusters.
+
+Custom Colormap: Discrete YlOrRd palette with gamma correction.
+
+Output: Saves heatmaps in Desktop/cluster_heatmap_<group> directories.
+
+Inputs
+
+Date-tagged CSVs (filename_dates_parsed_*.csv).
+
+Cluster assignment CSVs (dbscan_<group>_<scope>.csv).
+
+Outputs
+
+PNG heatmaps
+
+
+2. Script: clustered_full_plasma.py
+Purpose
+
+This script generates full-line clustered heatmaps (across all years found in the dataset).
+Instead of using only counts, it applies row-column hybrid z-score normalization with gamma scaling and percentile clipping for balanced visual representation. The color map is continuous (plasma) instead of discrete.
+
+Key Features
+
+Full Timeline: Includes all years observed in the dataset.
+
+Hybrid Normalization: Combines row z-score (per language) and column z-score (per year) for balanced scaling.
+
+Gamma Scaling & Percentile Clipping: Enhances visibility of both frequent and rare mentions.
+
+Flexible Config: Each group has its own gamma and percentile thresholds (e.g., objects use gamma=0.4, ideologies/sports use gamma=0.7).
+
+Output: Saves heatmaps in Desktop/clustered_full_plasma_<group> directories.
+
+Inputs
+
+Date-tagged CSVs (filename_dates_packed_*.csv).
+
+Cluster assignment CSVs (dbscan_<group>_<scope>.csv).
+
+Outputs
+
+PNG heatmaps
