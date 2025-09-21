@@ -1,1 +1,58 @@
+Heatmap Generation Scripts
 
+This repository contains two Python scripts for generating heatmaps of language–year mentions extracted from Wikipedia’s historical corpora. Both scripts process pre-tagged CSV files containing filename/language information and date mentions, but they implement different visualization strategies.
+
+Input Data
+
+Each script expects input CSV files with the following structure:
+
+filename: The text file representing a Wikipedia article in a specific language.
+
+dates_part* columns: Columns containing extracted date mentions (strings).
+
+Wordcount files (used in Script 1): Contain filename and wordcount information.
+
+Script 1: Full Hybrid Normalized Heatmap
+
+
+Purpose
+
+Generates continuous heatmaps across all years, using a hybrid normalization that combines row and column z-scores to balance across languages and years.
+
+Key Features
+
+Hybrid normalization: 70% row z-score + 30% column z-score.
+
+Percentile clipping: Remove extreme outliers with pct_low / pct_high.
+
+Gamma correction: Enhance contrast via PowerNorm.
+
+Per-group configuration: Customize gamma/percentiles for sports, ideologies, and objects.
+
+Output: One heatmap per group covering all years.
+
+
+Script 2: Time Windowed Discrete Heatmap
+
+
+Purpose
+
+Generates discrete heatmaps split into predefined time windows (e.g., 1700–2025, 1800–2025, …). Each heatmap highlights relative frequency per language.
+
+Key Features
+
+Time slicing: Five preset windows, including BCE support (-1000 to 2025).
+
+Row normalization: Each language is scaled by its own maximum frequency.
+
+Discrete colormap: 15 levels (YlOrRd colormap) with white row separators.
+
+Gamma correction: Adjustable via GAMMA.
+
+Output: Multiple heatmaps per group, one per time window.
+
+Both scripts use dictionaries to configure input/output paths and parameters:
+
+Groups: sports, ideologies, objects.
+
+Input paths: Point to CSVs with tagged dates.
