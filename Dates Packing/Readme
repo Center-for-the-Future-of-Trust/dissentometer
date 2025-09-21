@@ -1,1 +1,75 @@
+Purpose
 
+This script processes Wikipedia-derived, date-tagged CSV files and transforms them into structured outputs that can be used for downstream analysis (e.g., Wasserstein distance matrices, DBSCAN clustering).
+
+It extracts <date> tags, interprets historical references (dynasties, centuries, decades, BCE/CE years), and produces two complementary datasets:
+
+Packed files – all extracted dates stored in segmented columns (avoiding overly long cells).
+
+Parsed files – normalized years (integers, including BCE as negatives) for direct quantitative analysis.
+
+Workflow
+1. Input
+
+Reads CSV files from three thematic subfolders:
+
+historical_objects_tagged/
+
+history_of_ideologies_tagged/
+
+history_of_sports_tagged/
+
+Expected columns:
+
+filename → language file name (must end in .txt).
+
+date_tagged → raw <date>...</date> content.
+
+2. Date Extraction
+
+Regex-based parsing: <date> tags are extracted.
+
+Dynasty & era mapping: Maps terms like Han dynasty, Meiji era, or Victorian era to approximate representative years.
+
+Centuries: Parses both numeric (“19th century”) and word-based (“fifteenth century BC”) forms.
+
+Decades: Recognizes expressions such as “1990s”, “early 1800s”, “mid-20s”.
+
+Years: Handles plain years (e.g., “1945”), AD/CE, and BC/BCE (converted to negative values).
+
+All duplicates are preserved to avoid information loss.
+
+3. Outputs
+
+The script produces two files per subfolder:
+
+Packed CSV
+
+Filename: filename_dates_packed_{sub}.csv
+
+Each row = filename + multiple dates_partN columns.
+
+Stores extracted <date> tags and parsed results in split segments to avoid exceeding cell size limits.
+
+Example columns:
+
+filename, dates_part1, dates_part2, ...
+English.txt, "1200, 1300, Han dynasty", "1500, 1600"
+
+
+Parsed CSV
+
+Filename: filename_dates_parsed_{sub}.csv
+
+Each row = filename + parsed_years column.
+
+Contains only normalized integer years (e.g., -221, 618, 1644).
+
+Suitable for quantitative analysis, clustering, and visualization.
+
+
+Why Two Versions?
+
+Packed files preserve context and allow human-readable inspection.
+
+Parsed files provide clean numeric year sequences for statistical models and clustering.
