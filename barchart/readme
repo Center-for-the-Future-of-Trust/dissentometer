@@ -1,1 +1,51 @@
+Mentions & Word Counts Visualization Scripts
 
+This repository contains two Python scripts that generate visualizations from Wikipedia-based multilingual historical corpora. Both scripts read pre-processed CSV files (containing language filenames, extracted dates, or word counts) and output category-based visual summaries.
+
+Script 1: Mentions across Time Windows
+
+
+Purpose
+
+Generates side-by-side bar charts showing:
+
+Height = total mentions of years inside each time window.
+
+Width = number of languages contributing mentions.
+
+Key Features
+
+Five historical time windows are defined in TIME_WINDOWS such as
+
+1917–1920
+
+1939–1945
+
+1789–1799
+
+Annotates each bar with:
+
+Languages contributing (langs)
+
+Total mentions (mentions)
+
+Side-by-side comparison across sports, ideologies, and objects.
+
+
+
+Script 2: Word Counts per Language
+
+
+Purpose
+
+Generates horizontal bar charts of word counts (log-transformed) for each language in every category.
+
+Key Features
+
+Log10 transformation applied to word counts.
+
+Separate figure per category (sports, ideologies, objects).
+
+Languages sorted by word count for clarity.
+
+Dynamic figure height: scales with the number of languages (0.25 inch per language).
