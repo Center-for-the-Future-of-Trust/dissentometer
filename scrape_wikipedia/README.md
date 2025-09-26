@@ -64,11 +64,9 @@ It’s not multi-process or multi-threaded CPU parallelism. Python’s GIL means
 
 ---
 
+### Directory Map 
 
-
----
-
-Update this: 
+This is a directory map of the output from `wikipedia_scraper.py`.
 
 ```
 Wiki_Scrape/
