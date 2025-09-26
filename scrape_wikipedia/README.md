@@ -18,6 +18,8 @@ For a single wiki (say English), no more than 5 at the same time.
 
 This prevents hammering one language’s API server.
 
+--concurrency is global and --per-host fences per language host (e.g., en.wikipedia.org, fr.wikipedia.org). To actually use all 16 lanes, you need enough different hosts in flight
+
 -------------
 
 So if you don’t specify --langs, it runs with --langs all by default.
