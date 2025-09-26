@@ -104,4 +104,9 @@ Notes
 
 This only affects folder/file names, not the article text. The .txt contents are saved in UTF-8 either way.
 
-To confirm you have non-ASCII filenames after a run:
+
+
+
+Yes. The scraper talks to Wikipedia using the Unicode page/category titles, so it will fetch pages just fine even when the names contain non-ASCII characters.
+
+What the --ascii-filenames flag changes is only the names on disk (folders/files). It transliterates those paths to ASCII so your filesystem is “safe,” but the HTTP requests still use the original Unicode titles.
