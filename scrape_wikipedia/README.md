@@ -94,3 +94,12 @@ Prevents duplication when you parallelize or run multiple jobs.
 -----
 
 It’s not multi-process or multi-threaded CPU parallelism. Python’s GIL means CPU-heavy work isn’t sped up; but this scraper is network-bound, so async concurrency is the right tool.
+
+
+
+
+---
+
+will need to get rid of sqlite path 
+
+rm /home/sbuongi/wikipedia_articles/crawler_state.sqlite
