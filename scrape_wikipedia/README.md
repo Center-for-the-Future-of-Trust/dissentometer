@@ -1,23 +1,18 @@
 # scrape_wikipedia.py
 
-
-
 ### Python CLI Flags
----
 
-### `--output PATH`
+#### `--output PATH`
 - **Description**: Root directory where scraped results are written.  
 - **Default**: `~/Desktop/Wiki_Scrape`  
-- **In the batch script**: overridden to `$PWD/wikipedia_articles` (the folder where the job was submitted).  
+- **In the sbatch script**: overridden to `$PWD/wikipedia_articles` (the folder where the job was submitted).  
 
 **Examples:**
 ```bash
---output /scratch/$USER/wiki_run1
+--output /scratch/$USER/wiki_run
 ```
 
----
-
-### `--concurrency N`
+#### `--concurrency N`
 - **Description**: Global maximum number of HTTP requests in flight across *all* Wikipedia languages.  
 - **Effect**: Higher = faster, but can stress the network or hit API limits.  
 
@@ -27,13 +22,17 @@
 --concurrency 24   # aggressive (faster, more risky)
 ```
 
----
-
-### `--per-host N`
+#### `--per-host N`
 - **Description**: Maximum number of concurrent requests to a *single* Wikipedia host (e.g., `en.wikipedia.org`).  
 - **Effect**: Prevents hammering one language while still allowing concurrency across others.  
 - **Typical values**: 3–6  
-- **Rule of thumb**: keep `concurrency ≥ 3 × per-host`.  
+- **Rule of thumb**: keep `concurrency ≥ 3 × per-host`.
+
+🚦 Why keep concurrency ≥ 3 × per-host
+
+If concurrency is too close to per-host, then one host can easily dominate the global pool.
+Example:
+
 
 **Examples:**
 ```bash
