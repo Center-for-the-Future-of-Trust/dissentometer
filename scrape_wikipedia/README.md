@@ -103,3 +103,31 @@ It’s not multi-process or multi-threaded CPU parallelism. Python’s GIL means
 will need to get rid of sqlite path 
 
 rm /home/sbuongi/wikipedia_articles/crawler_state.sqlite
+
+
+---
+
+```
+<OUTPUT>/
+  History of ideologies/
+    en/
+      History of ideologies/
+        depth_1/
+          <root-level-article__hash>/
+            English__en.txt
+            Français__fr.txt
+            ...
+          <Subcat A>/                ← subcategory surfaced at depth 1
+          <Subcat B>/
+        depth_2/
+          <Subcat A>/
+            <article__hash>/
+              English__en.txt
+              ...
+          <Subcat B>/
+            <article__hash>/...
+        depth_3/
+          <Sub-subcat C>/
+            <article__hash>/...
+        ...
+```
