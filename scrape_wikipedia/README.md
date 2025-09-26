@@ -54,42 +54,6 @@ If a wiki doesn’t have a langlink for that article, the scraper won’t magica
 -------------
 
 
-What’s stored in the DB
-
-Two tables:
-
-categories(lang, title) → records which categories have already been crawled.
-
-pages(lang, title) → records which article pages have already been claimed.
-
-That’s it — no text content, just language + title pairs.
-
-When entries get written
-
-Not up front. The script doesn’t load all articles into the DB first.
-
-Instead, the DB is populated as you go:
-
-When a category is about to be scraped, it calls ledger.claim_category(...).
-
-If it’s new, it’s inserted.
-
-If it’s already there, it’s skipped.
-
-When a batch of pages is about to be fetched, it calls ledger.claim_page(...) or claim_pages_many(...).
-
-If a page hasn’t been seen before, it’s inserted.
-
-If it was already inserted in a previous run or by another worker, it’s skipped.
-
-Why this design
-
-Keeps the DB small (only holds titles you’ve actually encountered).
-
-Supports resumability: if the scraper crashes halfway, rerunning will skip anything already in the DB.
-
-Prevents duplication when you parallelize or run multiple jobs.
-
 
 -----
 
@@ -100,12 +64,11 @@ It’s not multi-process or multi-threaded CPU parallelism. Python’s GIL means
 
 ---
 
-will need to get rid of sqlite path 
-
-rm /home/sbuongi/wikipedia_articles/crawler_state.sqlite
 
 
 ---
+
+Update this: 
 
 ```
 <OUTPUT>/
@@ -133,48 +96,3 @@ rm /home/sbuongi/wikipedia_articles/crawler_state.sqlite
 ```
 
 
-
-
---------------------
-
-
-Yes—your async version does recurse through subcategories like the serial one.
-
-How it handles subcategories (async)
-
-In crawl_category(...) it:
-
-pulls pages for the current category (get_category_members(..., want_subcats=False))
-
-then pulls subcategories (get_category_members(..., want_subcats=True))
-
-recursively calls crawl_category(...) for each subcategory with depth+1 until --max-depth is reached.
-
-Output layout is flattened by depth:
-
-
--------------
-
-
-Here’s the clear difference:
-
---dedup-scope none
-
-What it does: Turns off deduplication. Every time a page (lang, title) is encountered anywhere, it’s treated as new work.
-
-Resulting files: You’ll get a copy every time that page shows up under a different depth/subcategory (and even if it reappears in the same place you’ll at least re-attempt the write; the atomic writer will skip if the exact same file path already exists).
-
-Why counts explode: The same article often belongs to several subcategories; with none, each occurrence produces a separate article folder under each subcategory/depth.
-
-Trade-offs: Maximum coverage, maximum disk usage, more API calls (slower), more duplicates.
-
---dedup-scope subtree
-
-What it does: Deduplicates within each subcategory path (the chain from the root to the current subcategory).
-Internally the DB key includes: root_label || subcat_path_chain. If a page (lang, title) was already saved anywhere inside the same path, it won’t be saved again there. But if the same page shows up under a different path, it will be saved again.
-
-Resulting files: You’ll still get duplicates across different subcategory branches, but not within the same branch.
-
-Why counts are moderate: Keeps the useful context (one copy per branch) without ballooning to “every single occurrence”.
-
-Trade-offs: Middle ground: more files than root scope, fewer than none. Good when you want per-branch snapshots but don’t want runaway duplication.
