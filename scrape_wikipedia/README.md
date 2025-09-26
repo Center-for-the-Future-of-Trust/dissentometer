@@ -22,7 +22,7 @@ This prevents hammering one language’s API server.
 
 -------------
 
-So if you don’t specify --langs, it runs with --langs all by default.
+So if you don’t specify `--langs`, it runs with `--langs all` by default.
 
 That means for every article in your root categories, the scraper will:
 
