@@ -18,18 +18,6 @@ For a single wiki (say English), no more than 5 at the same time.
 
 This prevents hammering one language’s API server.
 
---batch-size 60
-
-How many page titles to request at once when fetching extracts + langlinks in batch mode.
-
-Instead of making one API request per page, the scraper groups them:
-
-With batch size 60, it asks for up to 60 articles at once in a single API call.
-
-Bigger batch = fewer total HTTP requests = more efficient.
-
-But too big = slower responses, heavier JSON payloads, and higher memory use.
-
 -------------
 
 So if you don’t specify --langs, it runs with --langs all by default.
