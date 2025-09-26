@@ -71,28 +71,23 @@ It’s not multi-process or multi-threaded CPU parallelism. Python’s GIL means
 Update this: 
 
 ```
-<OUTPUT>/
-  History of ideologies/
-    en/
-      History of ideologies/
-        depth_1/
-          <root-level-article__hash>/
-            English__en.txt
-            Français__fr.txt
+Wiki_Scrape/
+  <lang-code>/                                # e.g., en, fr, es, ru, zh, ...
+    <Localized Root Category>/                # “History of ideologies”, etc., localized via langlinks
+      <Subcategory 1>/
+        <Sub-subcategory .../>                # recurses until --max-depth (default 4)
+          <Article Title A>/                  # each *article* gets its own folder
+            <LanguageName>.txt                # one .txt per language variant (base + langlinks)
+            <LanguageName>.txt
             ...
-          <Subcat A>/                ← subcategory surfaced at depth 1
-          <Subcat B>/
-        depth_2/
-          <Subcat A>/
-            <article__hash>/
-              English__en.txt
-              ...
-          <Subcat B>/
-            <article__hash>/...
-        depth_3/
-          <Sub-subcat C>/
-            <article__hash>/...
+          <Article Title B>/
+            <LanguageName>.txt
+            ...
+      <Subcategory 2>/
         ...
+  <another-lang-code>/                        # Although it is unlikely that a category page would have another lang code
+    <Localized Root Category>/
+      ...
 ```
 
 -----
