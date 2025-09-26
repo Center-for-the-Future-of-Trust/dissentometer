@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1                  # one task (single process)
 #SBATCH --cpus-per-task=4           # 4 CPU cores reserved
 #SBATCH --mem=16G                   # memory (adjust as needed)
-#SBATCH --partition=standard        # partition/queue name (adjust for your cluster)
+#SBATCH --partition=debug
 
 # Load modules if needed
 module load python/3.10
