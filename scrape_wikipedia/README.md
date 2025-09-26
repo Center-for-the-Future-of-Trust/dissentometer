@@ -95,4 +95,13 @@ Update this:
         ...
 ```
 
+-----
 
+
+The script’s default is Unicode filenames (ASCII_FILENAMES=False), so without the flag it will keep non-ASCII names.
+
+Notes
+
+This only affects folder/file names, not the article text. The .txt contents are saved in UTF-8 either way.
+
+To confirm you have non-ASCII filenames after a run:
