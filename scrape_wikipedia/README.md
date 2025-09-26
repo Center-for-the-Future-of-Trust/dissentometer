@@ -89,3 +89,8 @@ Keeps the DB small (only holds titles you’ve actually encountered).
 Supports resumability: if the scraper crashes halfway, rerunning will skip anything already in the DB.
 
 Prevents duplication when you parallelize or run multiple jobs.
+
+
+-----
+
+It’s not multi-process or multi-threaded CPU parallelism. Python’s GIL means CPU-heavy work isn’t sped up; but this scraper is network-bound, so async concurrency is the right tool.
