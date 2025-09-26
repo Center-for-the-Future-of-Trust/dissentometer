@@ -1,3 +1,96 @@
+# scrape_wikipedia.py
+
+
+
+### Python CLI Flags
+---
+
+### `--output PATH`
+- **Description**: Root directory where scraped results are written.  
+- **Default**: `~/Desktop/Wiki_Scrape`  
+- **In the batch script**: overridden to `$PWD/wikipedia_articles` (the folder where the job was submitted).  
+
+**Examples:**
+```bash
+--output /scratch/$USER/wiki_run1
+```
+
+---
+
+### `--concurrency N`
+- **Description**: Global maximum number of HTTP requests in flight across *all* Wikipedia languages.  
+- **Effect**: Higher = faster, but can stress the network or hit API limits.  
+
+**Examples:**
+```bash
+--concurrency 8    # conservative (slower, polite)
+--concurrency 24   # aggressive (faster, more risky)
+```
+
+---
+
+### `--per-host N`
+- **Description**: Maximum number of concurrent requests to a *single* Wikipedia host (e.g., `en.wikipedia.org`).  
+- **Effect**: Prevents hammering one language while still allowing concurrency across others.  
+- **Typical values**: 3–6  
+- **Rule of thumb**: keep `concurrency ≥ 3 × per-host`.  
+
+**Examples:**
+```bash
+--per-host 4
+--per-host 2   # stricter, good for testing
+```
+
+---
+
+### `--max-depth D`
+- **Description**: Category recursion depth.  
+  - `1` → just root category pages.  
+  - `2` → root + immediate subcategories.  
+  - `3–5` → deeper, grows output size exponentially.  
+- **Effect**: The main driver of runtime and output size.  
+
+**Examples:**
+```bash
+--max-depth 1   # quick sanity run
+--max-depth 3   # balanced crawl
+--max-depth 5   # deep, large crawl
+```
+
+---
+
+### `--ascii-filenames`
+- **Description**: Transliterates folder/file names to ASCII (using `unidecode`).  
+- **Effect**: Safer on Windows/ZIP transfers, avoids issues with non-ASCII filenames.  
+- **Note**: Text content is still saved as UTF-8 inside the `.txt` files.  
+
+**Examples:**
+```bash
+--ascii-filenames
+```
+
+---
+
+# Usage Examples
+
+### Balanced crawl
+```bash
+srun python wikipedia_scraper.py   --output /scratch/$USER/wiki_test   --concurrency 16   --per-host 5   --max-depth 3   --ascii-filenames
+```
+
+### Quick test (small, fast, polite)
+```bash
+python wikipedia_scraper.py   --output ~/Desktop/Wiki_Test   --concurrency 8   --per-host 3   --max-depth 1   --ascii-filenames
+```
+
+### Heavy run (lots of data, cluster only)
+```bash
+srun python wikipedia_scraper.py   --output /scratch/$USER/wiki_full   --concurrency 24   --per-host 6   --max-depth 5
+```
+
+
+
+
 --concurrency 16
 
 Global limit: the maximum number of HTTP requests the scraper will have “in flight” at once across all wikis.
@@ -42,7 +135,16 @@ If a wiki doesn’t have a langlink for that article, the scraper won’t magica
 
 
 -------------
+Configuration Options
+--output PATH
 
+What it does: Sets the root directory where scraped results are written.
+
+Default: ~/Desktop/Wiki_Scrape
+
+In your batch script: overridden to $PWD/wikipedia_articles (the folder where the job was submitted).
+
+Examples:
 
 
 -----
