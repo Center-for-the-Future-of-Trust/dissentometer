@@ -131,3 +131,23 @@ rm /home/sbuongi/wikipedia_articles/crawler_state.sqlite
             <article__hash>/...
         ...
 ```
+
+
+
+
+--------------------
+
+
+Yes—your async version does recurse through subcategories like the serial one.
+
+How it handles subcategories (async)
+
+In crawl_category(...) it:
+
+pulls pages for the current category (get_category_members(..., want_subcats=False))
+
+then pulls subcategories (get_category_members(..., want_subcats=True))
+
+recursively calls crawl_category(...) for each subcategory with depth+1 until --max-depth is reached.
+
+Output layout is flattened by depth:
