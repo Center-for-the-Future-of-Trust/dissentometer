@@ -47,3 +47,45 @@ Save every variant (French, Spanish, German, Japanese, etc.) if a link exists.
 “All” here means all languages linked via Wikipedia’s interlanguage links.
 
 If a wiki doesn’t have a langlink for that article, the scraper won’t magically discover it. (That’s just how Wikipedia organizes equivalences between pages.)
+
+
+
+
+-------------
+
+
+What’s stored in the DB
+
+Two tables:
+
+categories(lang, title) → records which categories have already been crawled.
+
+pages(lang, title) → records which article pages have already been claimed.
+
+That’s it — no text content, just language + title pairs.
+
+When entries get written
+
+Not up front. The script doesn’t load all articles into the DB first.
+
+Instead, the DB is populated as you go:
+
+When a category is about to be scraped, it calls ledger.claim_category(...).
+
+If it’s new, it’s inserted.
+
+If it’s already there, it’s skipped.
+
+When a batch of pages is about to be fetched, it calls ledger.claim_page(...) or claim_pages_many(...).
+
+If a page hasn’t been seen before, it’s inserted.
+
+If it was already inserted in a previous run or by another worker, it’s skipped.
+
+Why this design
+
+Keeps the DB small (only holds titles you’ve actually encountered).
+
+Supports resumability: if the scraper crashes halfway, rerunning will skip anything already in the DB.
+
+Prevents duplication when you parallelize or run multiple jobs.
