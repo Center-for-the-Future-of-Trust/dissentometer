@@ -311,7 +311,7 @@ def main():
     global ASCII_FILENAMES
 
     p = argparse.ArgumentParser(description="Async Wikipedia category scraper with serial behavior")
-    p.add_argument("--output", type=str, default=str(Path.home() / "Desktop" / "Wiki_Scrape"),
+    p.add_argument("--output", type=str, default=str(Path.home() / "Desktop" / "wikipedia_articles"),
                    help="Output directory (default: ~/Desktop/Wiki_Scrape)")
     p.add_argument("--concurrency", type=int, default=12,
                    help="Global concurrent HTTP requests (default: 12)")
@@ -335,4 +335,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
