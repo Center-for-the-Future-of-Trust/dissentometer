@@ -29,3 +29,21 @@ With batch size 60, it asks for up to 60 articles at once in a single API call.
 Bigger batch = fewer total HTTP requests = more efficient.
 
 But too big = slower responses, heavier JSON payloads, and higher memory use.
+
+-------------
+
+So if you don’t specify --langs, it runs with --langs all by default.
+
+That means for every article in your root categories, the scraper will:
+
+Save the English version (or whatever the base language is).
+
+Use the langlinks API to discover all interlanguage links for that article.
+
+Save every variant (French, Spanish, German, Japanese, etc.) if a link exists.
+
+⚠️ A nuance:
+
+“All” here means all languages linked via Wikipedia’s interlanguage links.
+
+If a wiki doesn’t have a langlink for that article, the scraper won’t magically discover it. (That’s just how Wikipedia organizes equivalences between pages.)
