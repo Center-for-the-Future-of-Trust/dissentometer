@@ -151,3 +151,30 @@ then pulls subcategories (get_category_members(..., want_subcats=True))
 recursively calls crawl_category(...) for each subcategory with depth+1 until --max-depth is reached.
 
 Output layout is flattened by depth:
+
+
+-------------
+
+
+Here’s the clear difference:
+
+--dedup-scope none
+
+What it does: Turns off deduplication. Every time a page (lang, title) is encountered anywhere, it’s treated as new work.
+
+Resulting files: You’ll get a copy every time that page shows up under a different depth/subcategory (and even if it reappears in the same place you’ll at least re-attempt the write; the atomic writer will skip if the exact same file path already exists).
+
+Why counts explode: The same article often belongs to several subcategories; with none, each occurrence produces a separate article folder under each subcategory/depth.
+
+Trade-offs: Maximum coverage, maximum disk usage, more API calls (slower), more duplicates.
+
+--dedup-scope subtree
+
+What it does: Deduplicates within each subcategory path (the chain from the root to the current subcategory).
+Internally the DB key includes: root_label || subcat_path_chain. If a page (lang, title) was already saved anywhere inside the same path, it won’t be saved again there. But if the same page shows up under a different path, it will be saved again.
+
+Resulting files: You’ll still get duplicates across different subcategory branches, but not within the same branch.
+
+Why counts are moderate: Keeps the useful context (one copy per branch) without ballooning to “every single occurrence”.
+
+Trade-offs: Middle ground: more files than root scope, fewer than none. Good when you want per-branch snapshots but don’t want runaway duplication.
