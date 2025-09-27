@@ -1,5 +1,11 @@
 # scrape_wikipedia.py
 
+Check: Count the number of .txt files
+
+```
+find wikipedia_articles -type f -iname '*.txt' | wc -l
+```
+
 ### Python CLI Flags
 
 #### `--output PATH`
