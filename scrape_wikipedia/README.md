@@ -12,6 +12,9 @@ html to see if it returned an error.
 find wikipedia_articles -type f -iname '*.html' | wc -l
 ```
 
+adding batch because 
+i can pass 1 at a time, or supposedly 50 articles at a time (in a single request) 
+
 ### Python CLI Flags
 
 #### `--output PATH`
