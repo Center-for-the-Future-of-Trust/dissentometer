@@ -2,6 +2,14 @@
 
 Check: Count the number of .txt files
 
+With GLOBAL_MIN_INTERVAL = 0.25, your code allows ~4 requests/second total no matter how high --concurrency is. So --concurrency 16 ≈ --concurrency 4 in throughput.
+
+What to change (fast + safe)
+
+Lower the global cap
+
+In your script, set:
+
 ```
 find wikipedia_articles -type f -iname '*.txt' | wc -l
 ```
