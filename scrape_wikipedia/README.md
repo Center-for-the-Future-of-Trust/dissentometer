@@ -15,6 +15,23 @@ find wikipedia_articles -type f -iname '*.html' | wc -l
 adding batch because 
 i can pass 1 at a time, or supposedly 50 articles at a time (in a single request) 
 
+
+Global concurrency
+
+Start low: --concurrency 2 or --concurrency 3.
+
+That’s 2–3 requests “in flight” at a time globally. With batch size 50, that’s up to 150 articles processed per wave.
+
+Per-host concurrency
+
+Keep --per-host 1.
+
+This prevents hammering a single language Wikipedia. Each host gets one request at a time.
+
+Batch size
+
+Use --batch 50. Wikimedia caps at 50 titles for normal accounts; higher numbers just get split.
+
 ### Python CLI Flags
 
 #### `--output PATH`
