@@ -6,6 +6,12 @@ Check: Count the number of .txt files
 find wikipedia_articles -type f -iname '*.txt' | wc -l
 ```
 
+html to see if it returned an error. 
+
+```
+find wikipedia_articles -type f -iname '*.html' | wc -l
+```
+
 ### Python CLI Flags
 
 #### `--output PATH`
