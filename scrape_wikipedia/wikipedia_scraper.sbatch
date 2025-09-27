@@ -45,9 +45,4 @@ python -V
 echo "[info] outdir = $OUTDIR"
 
 # --- Run ---
-srun "$VENV/bin/python" "$SCRIPT" \
-  --output "$OUTDIR" \
-  --concurrency 16 \
-  --per-host 5 \
-  --max-depth 4 \
-  --ascii-filenames
+srun "$VENV/bin/python" "$SCRIPT"   --output "$OUTDIR"   --concurrency 10   --per-host 3   --batch 50   --max-depth 4   --ascii-filenames
