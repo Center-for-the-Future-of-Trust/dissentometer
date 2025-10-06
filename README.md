@@ -35,5 +35,11 @@ what data (translations of articles)
 ## Citation
 
 ```
-Buongiorno, Steph, Rosie Larson, and Nan Jiang. Dissentometer. GitHub Repository. The Center for the Future of Trust. Available at: https://github.com/Center-for-the-Future-of-Trust/dissentometer/tree/main 
+@misc{buongiorno_dissentometer,
+  author       = {Buongiorno, Steph and Larson, Rosie and Jiang, Nan},
+  title        = {Dissentometer},
+  howpublished = {\url{https://github.com/Center-for-the-Future-of-Trust/dissentometer/tree/main}},
+  note         = {GitHub Repository, The Center for the Future of Trust},
+  year         = {2025}
+}
 ```
