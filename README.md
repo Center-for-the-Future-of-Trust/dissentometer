@@ -31,3 +31,9 @@ which articles share headings
 
 what visualizations
 what data (translations of articles) 
+
+## Citation
+
+```
+Buongiorno, Steph, Rosie Larson, and Nan Jiang. Dissentometer. GitHub Repository. The Center for the Future of Trust. Available at: https://github.com/Center-for-the-Future-of-Trust/dissentometer/tree/main 
+```
