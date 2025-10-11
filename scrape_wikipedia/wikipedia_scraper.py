@@ -20,7 +20,6 @@
 #   --shards 8 --shard-id $SLURM_ARRAY_TASK_ID
 #
 # Notes:
-# - Set SLEEP_BETWEEN_CALLS to 0 to avoid double throttling (recommended).
 # - Tune GLOBAL_MIN_INTERVAL (0.20-0.30) only after checking _skipped.tsv for 429/maxlag.
 
 import argparse
@@ -42,7 +41,6 @@ API_URL_TMPL       = "https://{lang}.wikipedia.org/w/api.php"
 INCUBATOR_API_URL  = "https://incubator.wikimedia.org/w/api.php"
 USER_AGENT         = "WikipediaScraper/5.0 (contact: you@example.org)"
 TIMEOUT_S          = 30
-SLEEP_BETWEEN_CALLS = 0.0  # keep 0 to avoid double throttling with GLOBAL_MIN_INTERVAL
 MAX_DEPTH_DEFAULT  = 4
 
 # Global minimum interval between ANY two outgoing requests (seconds).
@@ -55,7 +53,7 @@ THROTTLE_LOG_EVERY = 20
 HTTP_429_COUNT = 0
 MAXLAG_COUNT = 0
 
-# Root categories (English seeds)
+# Root categories (English seeds; WITHOUT namespace)
 EN_ROOT_CATEGORIES = [
     "Historical objects",
     "History of sports",
@@ -235,8 +233,6 @@ class WikiClient:
                             try:
                                 data = json.loads(text)
                             except Exception:
-                                if SLEEP_BETWEEN_CALLS > 0:
-                                    await asyncio.sleep(SLEEP_BETWEEN_CALLS)
                                 return {"__non_json__": True, "raw": text, "content_type": ctype, "url": str(resp.url)}
 
                             # MediaWiki maxlag error handling
@@ -256,13 +252,9 @@ class WikiClient:
                                 backoff = min(backoff * 2, 30.0)
                                 continue
 
-                            if SLEEP_BETWEEN_CALLS > 0:
-                                await asyncio.sleep(SLEEP_BETWEEN_CALLS)
                             return data
 
                         # Non-JSON response (e.g., redirects to HTML)
-                        if SLEEP_BETWEEN_CALLS > 0:
-                            await asyncio.sleep(SLEEP_BETWEEN_CALLS)
                         return {"__non_json__": True, "raw": text, "content_type": ctype, "url": str(resp.url)}
 
                 except Exception as e:
@@ -274,6 +266,10 @@ class WikiClient:
 
 # -------- API wrappers --------
 async def get_category_langlinks(client: WikiClient, lang: str, category_without_ns: str) -> List[Tuple[str, str]]:
+    """
+    From an English category name WITHOUT namespace (e.g., 'History of sports'),
+    return list of (lang, full_localized_category_title) pairs.
+    """
     params = {
         "action": "query",
         "format": "json",
@@ -292,19 +288,24 @@ async def get_category_langlinks(client: WikiClient, lang: str, category_without
     out = []
     for ll in page.get("langlinks", []) or []:
         lg = ll.get("lang")
-        ttl = ll.get("*")
+        ttl = ll.get("*")  # full localized title like "Thể loại:Lịch sử thể thao"
         if lg and ttl:
             out.append((lg, ttl))
     return out
 
-async def get_category_members(client: WikiClient, lang: str, category_without_ns: str, want_subcats: bool) -> List[str]:
+async def get_category_members(
+    client: WikiClient,
+    lang: str,
+    category_title_full: str,   # full, localized title, e.g., "Thể loại:Lịch sử thể thao"
+    want_subcats: bool
+) -> List[str]:
     members, cont = [], None
     cmtype = "subcat" if want_subcats else "page"
     ns = "14" if want_subcats else "0"
     while True:
         params = {
             "action": "query", "format": "json", "list": "categorymembers",
-            "cmtitle": f"Category:{category_without_ns}",
+            "cmtitle": category_title_full,          # use as-is (no manual 'Category:' added)
             "cmtype": cmtype, "cmlimit": "500", "cmnamespace": ns,
         }
         if cont:
@@ -313,13 +314,11 @@ async def get_category_members(client: WikiClient, lang: str, category_without_n
         if not data or data.get("__error__") or data.get("__non_json__"):
             reason = "members_none" if not data else ("members_error" if data.get("__error__") else "members_non_json")
             extra = f"{cmtype} | {(data or {}).get('__error__','') or (data or {}).get('content_type','')}"
-            await log_skip(lang, f"Category:{category_without_ns}", reason, url=(data or {}).get("url",""), extra=extra)
+            await log_skip(lang, category_title_full, reason, url=(data or {}).get("url",""), extra=extra)
             break
         items = data.get("query", {}).get("categorymembers", []) or []
-        if want_subcats:
-            members += [it["title"].split("Category:", 1)[-1] for it in items if "title" in it]
-        else:
-            members += [it["title"] for it in items if "title" in it]
+        # Keep full titles exactly as returned
+        members += [it["title"] for it in items if "title" in it]
         cont = (data.get("continue", {}) or {}).get("cmcontinue")
         if not cont:
             break
@@ -473,7 +472,7 @@ async def save_article_and_variants(
 async def scrape_category(
     client: WikiClient,
     lang: str,
-    category_without_ns: str,
+    category_title_full: str,  # full, localized title (e.g., "Thể loại:Lịch sử thể thao")
     out_dir: Path,
     depth: int,
     max_depth: int,
@@ -481,17 +480,18 @@ async def scrape_category(
     shard_id: int,
     shards: int
 ):
-    print(f"{'  '*(depth-1)}? depth={depth}, scraping Category:{category_without_ns} [{lang}]")
+    print(f"{'  '*(depth-1)}? depth={depth}, scraping {category_title_full} [{lang}]")
 
     # Dedup category visits per process
     async with visit_lock:
-        ckey = (lang, f"Category:{category_without_ns}")
+        ckey = (lang, category_title_full)
         if ckey in visited_categories:
             return
         visited_categories.add(ckey)
 
     # Pages (articles) in this category
-    titles = await get_category_members(client, lang, category_without_ns, want_subcats=False)
+    titles = await get_category_members(client, lang, category_title_full, want_subcats=False)
+    print(f"[dbg] {category_title_full} [{lang}] pages={len(titles)} depth={depth}")
 
     # Shard titles: each job saves only its share
     if shards > 1:
@@ -513,12 +513,12 @@ async def scrape_category(
 
     # Recurse into subcategories (must traverse all to find this shard's pages deeper)
     if depth < max_depth:
-        subcats = await get_category_members(client, lang, category_without_ns, want_subcats=True)
+        subcats = await get_category_members(client, lang, category_title_full, want_subcats=True)
         sub_tasks = []
-        for subcat in subcats:
-            sub_dir = out_dir / sanitize(subcat)
+        for subcat_full in subcats:  # already full, localized titles
+            sub_dir = out_dir / sanitize(subcat_full)
             sub_tasks.append(scrape_category(
-                client, lang, subcat, sub_dir, depth + 1, max_depth, batch_size, shard_id, shards
+                client, lang, subcat_full, sub_dir, depth + 1, max_depth, batch_size, shard_id, shards
             ))
         await asyncio.gather(*sub_tasks)
 
@@ -532,7 +532,7 @@ async def amain(
     shard_id: int,
     shards: int
 ):
-    global skip_log_path, RAW_ANY_COUNT, RAW_HTML_COUNT, HTTP_429_COUNT, MAXLAG_COUNT
+    global skip_log_path, RAW_ANY_COUNT, RAW_HTML_COUNT, HTTP_429_COUNT, MAXLAG_COUNT, ASCII_FILENAMES
     output_dir.mkdir(parents=True, exist_ok=True)
 
     skip_log_path = output_dir / "_skipped.tsv"
@@ -540,27 +540,23 @@ async def amain(
         f.write("timestamp_utc\tlang\ttitle\treason\turl\textra\n")
 
     async with WikiClient(concurrency, per_host) as client:
-        # Build roots: English seeds + their langlinks
+        # Build roots: English seeds (with namespace) + their langlinks (already full, localized titles)
         roots: List[Tuple[str, str]] = []
         for root in EN_ROOT_CATEGORIES:
-            roots.append(("en", root))
+            roots.append(("en", f"Category:{root}"))  # English canonical namespace once
             try:
                 links = await get_category_langlinks(client, "en", root)
             except Exception as e:
                 print(f"? langlinks failed for root '{root}': {e}")
                 links = []
-            roots.extend(links)  # [(lg, localized_category_title_without_ns), ...]
+            roots.extend(links)  # [(lg, full_localized_category_title), ...]
 
-        # Shard roots to reduce overlapping traversal between jobs
-        if shards > 1:
-            before = len(roots)
-            roots = [(lg, ttl) for (lg, ttl) in roots if belongs_to_shard(lg, f"Category:{ttl}", shard_id, shards)]
-            after = len(roots)
-            print(f"[shard] roots filtered {before} -> {after} for shard {shard_id}/{shards}")
-
-        print("Will scrape these category entries:")
-        for lg, ttl in roots:
-            print(f" - [{lg}] Category:{ttl}")
+        # DO NOT SHARD ROOTS — every shard traverses all roots; only pages are sharded.
+        print(f"[info] total roots to traverse (unsharded): {len(roots)}")
+        for lg, ttl in roots[:20]:
+            print(f"  - [{lg}] {ttl}")
+        if len(roots) > 20:
+            print("  - ...")
 
         tasks = []
         for lg, ttl in roots:
@@ -627,3 +623,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
