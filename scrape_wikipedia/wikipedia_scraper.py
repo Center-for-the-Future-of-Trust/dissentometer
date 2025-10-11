@@ -44,7 +44,7 @@ TIMEOUT_S          = 30
 MAX_DEPTH_DEFAULT  = 4
 
 # Global minimum interval between ANY two outgoing requests (seconds).
-GLOBAL_MIN_INTERVAL = 0.1
+GLOBAL_MIN_INTERVAL = 0.0
 _last_request_ts = 0.0
 _rate_lock = asyncio.Lock()
 
@@ -623,5 +623,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
