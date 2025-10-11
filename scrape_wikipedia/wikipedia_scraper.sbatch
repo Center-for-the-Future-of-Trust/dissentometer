@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=wikiscrape_async_serial
+#SBATCH --job-name=wikipedia_scraper
 #SBATCH --output=wikiscrape_%A_%a.out
 #SBATCH --error=wikiscrape_%A_%a.err
 #SBATCH --time=168:00:00          # 7 days
