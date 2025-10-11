@@ -50,7 +50,7 @@ echo "[info] shard = ${SLURM_ARRAY_TASK_ID}"
 srun "$VENV/bin/python" "$SCRIPT" \
   --output "$OUTDIR" \
   --concurrency 10 \
-  --per-host 3 \
+  --per-host 2 \
   --batch 50 \
   --max-depth 4 \
   --ascii-filenames \
