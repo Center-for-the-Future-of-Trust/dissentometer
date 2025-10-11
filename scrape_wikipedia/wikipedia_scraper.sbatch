@@ -37,7 +37,7 @@ print("[deps] ok")
 PY
 
 # --- Paths & script name ---
-SCRIPT="wikipedia_scraper_async_seriallike.py"   # adjust if your filename differs
+SCRIPT="wikipedia_scraper.py"   # adjust if your filename differs
 OUTDIR="$PWD/wikipedia_articles"
 mkdir -p "$OUTDIR"
 
