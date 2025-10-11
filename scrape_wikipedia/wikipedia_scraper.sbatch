@@ -1,11 +1,12 @@
 #!/bin/bash -l
 #SBATCH --job-name=wikiscrape_async_serial
-#SBATCH --output=wikiscrape_%j.out
-#SBATCH --error=wikiscrape_%j.err
+#SBATCH --output=wikiscrape_%A_%a.out
+#SBATCH --error=wikiscrape_%A_%a.err
 #SBATCH --time=168:00:00          # 7 days
-#SBATCH --ntasks=1                # one Python process
+#SBATCH --ntasks=1                # one Python process per shard
 #SBATCH --cpus-per-task=2         # CPU cores for the async event loop
 #SBATCH --mem=30G
+#SBATCH --array=0-7               # <-- runs all 8 shards (IDs 0..7)
 #SBATCH --partition=debug         # <-- change to your real partition
 
 set -euo pipefail
@@ -36,13 +37,22 @@ print("[deps] ok")
 PY
 
 # --- Paths & script name ---
-SCRIPT="wikipedia_scraper.py"   # change if your filename differs
+SCRIPT="wikipedia_scraper_async_seriallike.py"   # adjust if your filename differs
 OUTDIR="$PWD/wikipedia_articles"
 mkdir -p "$OUTDIR"
 
 echo "[info] python = $(which python)"
 python -V
 echo "[info] outdir = $OUTDIR"
+echo "[info] shard = ${SLURM_ARRAY_TASK_ID}"
 
-# --- Run ---
-srun "$VENV/bin/python" "$SCRIPT"   --output "$OUTDIR"   --concurrency 10   --per-host 3   --batch 50   --max-depth 4   --ascii-filenames
+# --- Run for this shard ---
+srun "$VENV/bin/python" "$SCRIPT" \
+  --output "$OUTDIR" \
+  --concurrency 10 \
+  --per-host 3 \
+  --batch 50 \
+  --max-depth 4 \
+  --ascii-filenames \
+  --shards 8 \
+  --shard-id "${SLURM_ARRAY_TASK_ID}"
